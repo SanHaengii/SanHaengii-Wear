@@ -1,0 +1,5 @@
+## Copy this file to local.properties and fill in your real token if needed.
+## Do not commit local.properties.
+
+HEALTH_API_BASE_URL=https://web-production-94f63.up.railway.app
+HEALTH_API_TOKEN=
