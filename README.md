@@ -16,7 +16,7 @@ SanHaengii의 실제 센서 연동 전 검증을 위한 Wear OS 테스트 앱입
 
 ```json
 {
-  "measured_at": "2026-05-23T12:00:00Z",
+  "measured_at": "2026-05-23T21:00:00+09:00",
   "heart_rate": 120,
   "steps": 800,
   "calories": 12.4,
@@ -65,8 +65,11 @@ Health Services 에뮬레이터 synthetic data는 심박수와 걸음 관련 값
 - Stop HS exercise: exercise 종료
 - Send to backend: 현재 화면의 데이터를 백엔드로 전송
 - Start & send next: exercise를 시작하고 다음 Health Services update가 들어오면 바로 전송
+- Auto-send updates: ON/OFF 버튼. ON이면 Health Services update를 받을 때마다 백엔드로 자동 전송
 
 처음 시작할 때 `ACTIVITY_RECOGNITION`, `BODY_SENSORS` 또는 `READ_HEART_RATE` 권한 요청이 뜰 수 있습니다. 허용해야 Health Services 데이터를 받을 수 있습니다.
+
+`measured_at`은 한국 시간대인 KST(`Asia/Seoul`, `+09:00`) 오프셋이 포함된 ISO 문자열로 전송됩니다.
 
 ## 에뮬레이터 synthetic data 테스트
 

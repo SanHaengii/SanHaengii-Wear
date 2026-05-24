@@ -37,7 +37,9 @@ import kotlinx.coroutines.launch
 import org.json.JSONObject
 import java.net.HttpURLConnection
 import java.net.URL
-import java.time.Instant
+import java.time.OffsetDateTime
+import java.time.ZoneId
+import java.time.temporal.ChronoUnit
 import kotlin.math.roundToInt
 
 data class HealthServicesPayload(
@@ -89,7 +91,7 @@ data class HealthServicesPayload(
     companion object {
         fun empty(): HealthServicesPayload {
             return HealthServicesPayload(
-                measuredAt = Instant.now().toString(),
+                measuredAt = nowKstIsoString(),
                 heartRate = null,
                 steps = null,
                 calories = null,
@@ -115,10 +117,13 @@ class MainActivity : Activity() {
     private lateinit var stopExerciseButton: Button
     private lateinit var sendButton: Button
     private lateinit var startAndSendButton: Button
+    private lateinit var autoSendButton: Button
 
     private var currentPayload = HealthServicesPayload.empty()
     private var isExerciseRunning = false
+    private var isSending = false
     private var sendOnNextUpdate = false
+    private var autoSendEachUpdate = false
     private var supportedDataTypes = DEFAULT_DATA_TYPES
 
     private val exerciseUpdateCallback = object : ExerciseUpdateCallback {
@@ -128,9 +133,16 @@ class MainActivity : Activity() {
                 currentPayload = payload
                 renderPayload()
                 appendResult("Health Services update received.")
+                val shouldSend = sendOnNextUpdate || autoSendEachUpdate
                 if (sendOnNextUpdate) {
                     sendOnNextUpdate = false
-                    sendCurrentPayload()
+                }
+                if (shouldSend) {
+                    if (isSending) {
+                        appendResult("Auto-send skipped because a previous request is still running.")
+                    } else {
+                        sendCurrentPayload()
+                    }
                 }
             }
         }
@@ -249,6 +261,12 @@ class MainActivity : Activity() {
         }
         root.addView(startAndSendButton)
 
+        root.addSpace(8)
+        autoSendButton = button("Auto-send updates: OFF", Color.rgb(148, 163, 184)) {
+            toggleAutoSendUpdates()
+        }
+        root.addView(autoSendButton)
+
         root.addSpace(12)
         resultText = text(
             "Ready. Start a Health Services exercise to receive emulator/sensor updates.",
@@ -361,7 +379,7 @@ class MainActivity : Activity() {
             ?.roundToOneDecimal()
 
         return HealthServicesPayload(
-            measuredAt = Instant.now().toString(),
+            measuredAt = nowKstIsoString(),
             heartRate = heartRate,
             steps = steps,
             calories = calories,
@@ -440,6 +458,7 @@ class MainActivity : Activity() {
     }
 
     private fun setSending(isSending: Boolean) {
+        this.isSending = isSending
         sendButton.isEnabled = !isSending
         startAndSendButton.isEnabled = !isSending
         sendButton.text = if (isSending) "Sending..." else "Send to backend"
@@ -450,8 +469,25 @@ class MainActivity : Activity() {
         stopExerciseButton.isEnabled = isExerciseRunning
     }
 
+    private fun toggleAutoSendUpdates() {
+        autoSendEachUpdate = !autoSendEachUpdate
+        updateAutoSendButton()
+        appendResult("Auto-send updates: ${if (autoSendEachUpdate) "ON" else "OFF"}")
+    }
+
+    private fun updateAutoSendButton() {
+        autoSendButton.text = if (autoSendEachUpdate) {
+            "Auto-send updates: ON"
+        } else {
+            "Auto-send updates: OFF"
+        }
+        autoSendButton.setBackgroundColor(
+            if (autoSendEachUpdate) Color.rgb(251, 146, 60) else Color.rgb(148, 163, 184),
+        )
+    }
+
     private fun appendResult(message: String) {
-        val now = Instant.now().toString().substring(11, 19)
+        val now = nowKstTimeText()
         resultText.text = "[$now] $message\n\n${resultText.text}"
     }
 
@@ -546,6 +582,21 @@ class MainActivity : Activity() {
             DataType.CALORIES_TOTAL,
         )
     }
+}
+
+private val KST_ZONE: ZoneId = ZoneId.of("Asia/Seoul")
+
+private fun nowKstIsoString(): String {
+    return OffsetDateTime.now(KST_ZONE)
+        .truncatedTo(ChronoUnit.SECONDS)
+        .toString()
+}
+
+private fun nowKstTimeText(): String {
+    return OffsetDateTime.now(KST_ZONE)
+        .toLocalTime()
+        .truncatedTo(ChronoUnit.SECONDS)
+        .toString()
 }
 
 private fun JSONObject.putNullable(key: String, value: Any?): JSONObject {
