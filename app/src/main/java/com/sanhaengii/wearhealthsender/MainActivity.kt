@@ -117,6 +117,7 @@ class MainActivity : Activity() {
     private lateinit var stopExerciseButton: Button
     private lateinit var sendButton: Button
     private lateinit var startAndSendButton: Button
+    private lateinit var measureSpo2Button: Button
     private lateinit var autoSendButton: Button
 
     private var currentPayload = HealthServicesPayload.empty()
@@ -124,8 +125,12 @@ class MainActivity : Activity() {
     private var isSending = false
     private var sendOnNextUpdate = false
     private var autoSendEachUpdate = false
+    private var pendingPermissionAction = PendingPermissionAction.NONE
     private var nextFakeSpo2 = 100
-    private var lastFakeSpo2: Double? = null
+    private var lastSpo2: Double? = null
+    private var isFakeSpo2Active = false
+    private var spo2SourceText = "initializing"
+    private var samsungSpo2Provider: SamsungSpo2Provider? = null
     private var supportedDataTypes = DEFAULT_DATA_TYPES
 
     private val fakeSpo2Runnable = object : Runnable {
@@ -186,15 +191,15 @@ class MainActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(createContentView())
-        updateFakeSpo2(sendAfterUpdate = false)
         renderPayload()
         updateExerciseButtons()
         refreshCapabilities()
-        mainHandler.postDelayed(fakeSpo2Runnable, SPO2_TICK_MS)
+        startSpo2Provider()
     }
 
     override fun onDestroy() {
         mainHandler.removeCallbacks(fakeSpo2Runnable)
+        samsungSpo2Provider?.stop()
         if (isExerciseRunning) {
             exerciseClient.clearUpdateCallbackAsync(exerciseUpdateCallback)
             exerciseClient.endExerciseAsync()
@@ -211,10 +216,17 @@ class MainActivity : Activity() {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
         if (requestCode == HEALTH_SERVICES_PERMISSION_REQUEST) {
             if (hasRequiredPermissions()) {
-                appendResult("Health Services permissions granted.")
-                startExercise()
+                val action = pendingPermissionAction
+                pendingPermissionAction = PendingPermissionAction.NONE
+                appendResult("Health sensor permissions granted.")
+                when (action) {
+                    PendingPermissionAction.START_EXERCISE -> startExercise()
+                    PendingPermissionAction.MEASURE_SPO2 -> requestSpo2Measurement()
+                    PendingPermissionAction.NONE -> Unit
+                }
             } else {
-                appendResult("Health Services permissions were not granted.")
+                pendingPermissionAction = PendingPermissionAction.NONE
+                appendResult("Health sensor permissions were not granted.")
             }
         }
     }
@@ -258,6 +270,12 @@ class MainActivity : Activity() {
             stopExercise()
         }
         root.addView(stopExerciseButton)
+
+        root.addSpace(8)
+        measureSpo2Button = button("Measure SpO2", Color.rgb(125, 211, 252)) {
+            requestSpo2Measurement()
+        }
+        root.addView(measureSpo2Button)
 
         root.addSpace(8)
         sendButton = button("Send to backend", Color.rgb(34, 197, 94)) {
@@ -318,6 +336,7 @@ class MainActivity : Activity() {
 
     private fun startExercise() {
         if (!hasRequiredPermissions()) {
+            pendingPermissionAction = PendingPermissionAction.START_EXERCISE
             requestPermissions(requiredPermissions(), HEALTH_SERVICES_PERMISSION_REQUEST)
             return
         }
@@ -395,16 +414,91 @@ class MainActivity : Activity() {
             heartRate = heartRate,
             steps = steps,
             calories = calories,
-            spo2 = lastFakeSpo2,
+            spo2 = lastSpo2,
             bodyTemp = null,
             bloodPressureSystolic = null,
             bloodPressureDiastolic = null,
         )
     }
 
+    private fun startSpo2Provider() {
+        appendResult("SpO2 provider: trying Samsung Health Sensor SDK.")
+        val provider = SamsungSpo2Provider(
+            context = this,
+            mainHandler = mainHandler,
+            onReading = ::handleSamsungSpo2Reading,
+            onStatus = ::appendResult,
+            onFallbackNeeded = ::activateFakeSpo2Fallback,
+        )
+        samsungSpo2Provider = provider
+        if (provider.start()) {
+            isFakeSpo2Active = false
+            spo2SourceText = "Samsung Health Sensor SDK"
+            updateSpo2Button()
+            renderPayload()
+        }
+    }
+
+    private fun requestSpo2Measurement() {
+        if (!hasRequiredPermissions()) {
+            pendingPermissionAction = PendingPermissionAction.MEASURE_SPO2
+            requestPermissions(requiredPermissions(), HEALTH_SERVICES_PERMISSION_REQUEST)
+            return
+        }
+
+        if (isFakeSpo2Active) {
+            updateFakeSpo2(sendAfterUpdate = autoSendEachUpdate)
+            appendResult("Fake SpO2 fallback updated.")
+            return
+        }
+
+        val provider = samsungSpo2Provider
+        if (provider == null) {
+            activateFakeSpo2Fallback("Samsung SpO2 provider is not available.")
+        } else {
+            provider.requestMeasurement()
+        }
+    }
+
+    private fun handleSamsungSpo2Reading(spo2: Double, heartRate: Int?) {
+        lastSpo2 = spo2
+        spo2SourceText = "Samsung Health Sensor SDK"
+        currentPayload = currentPayload.copy(
+            measuredAt = nowKstIsoString(),
+            heartRate = heartRate ?: currentPayload.heartRate,
+            spo2 = spo2,
+        )
+        renderPayload()
+        appendResult("Samsung SpO2 measured: ${spo2.roundToInt()}%.")
+
+        if (autoSendEachUpdate) {
+            if (isSending) {
+                appendResult("Auto-send skipped because a previous request is still running.")
+            } else {
+                sendCurrentPayload()
+            }
+        }
+    }
+
+    private fun activateFakeSpo2Fallback(reason: String) {
+        if (isFakeSpo2Active) {
+            appendResult(reason)
+            return
+        }
+
+        samsungSpo2Provider?.stop()
+        samsungSpo2Provider = null
+        isFakeSpo2Active = true
+        spo2SourceText = "fake fallback"
+        updateSpo2Button()
+        appendResult("$reason Using fake SpO2 fallback.")
+        updateFakeSpo2(sendAfterUpdate = false)
+        mainHandler.postDelayed(fakeSpo2Runnable, SPO2_TICK_MS)
+    }
+
     private fun updateFakeSpo2(sendAfterUpdate: Boolean) {
         val spo2 = nextFakeSpo2.toDouble()
-        lastFakeSpo2 = spo2
+        lastSpo2 = spo2
         nextFakeSpo2 = if (nextFakeSpo2 <= MIN_FAKE_SPO2) {
             MAX_FAKE_SPO2
         } else {
@@ -492,7 +586,7 @@ class MainActivity : Activity() {
     }
 
     private fun renderPayload() {
-        payloadText.text = currentPayload.toDisplayText()
+        payloadText.text = "${currentPayload.toDisplayText()}\nSpO2 source: $spo2SourceText"
     }
 
     private fun setSending(isSending: Boolean) {
@@ -505,6 +599,17 @@ class MainActivity : Activity() {
     private fun updateExerciseButtons() {
         startExerciseButton.isEnabled = !isExerciseRunning
         stopExerciseButton.isEnabled = isExerciseRunning
+    }
+
+    private fun updateSpo2Button() {
+        if (!::measureSpo2Button.isInitialized) {
+            return
+        }
+        measureSpo2Button.text = if (isFakeSpo2Active) {
+            "Fake SpO2 next"
+        } else {
+            "Measure SpO2"
+        }
     }
 
     private fun toggleAutoSendUpdates() {
@@ -539,6 +644,7 @@ class MainActivity : Activity() {
         val permissions = mutableListOf(Manifest.permission.ACTIVITY_RECOGNITION)
         if (Build.VERSION.SDK_INT >= 36) {
             permissions += PERMISSION_READ_HEART_RATE
+            permissions += PERMISSION_READ_OXYGEN_SATURATION
         } else {
             permissions += Manifest.permission.BODY_SENSORS
         }
@@ -613,6 +719,8 @@ class MainActivity : Activity() {
     companion object {
         private const val HEALTH_SERVICES_PERMISSION_REQUEST = 30
         private const val PERMISSION_READ_HEART_RATE = "android.permission.health.READ_HEART_RATE"
+        private const val PERMISSION_READ_OXYGEN_SATURATION =
+            "android.permission.health.READ_OXYGEN_SATURATION"
         private const val SPO2_TICK_MS = 1_000L
         private const val MAX_FAKE_SPO2 = 100
         private const val MIN_FAKE_SPO2 = 90
@@ -623,6 +731,12 @@ class MainActivity : Activity() {
             DataType.CALORIES_TOTAL,
         )
     }
+}
+
+private enum class PendingPermissionAction {
+    NONE,
+    START_EXERCISE,
+    MEASURE_SPO2,
 }
 
 private val KST_ZONE: ZoneId = ZoneId.of("Asia/Seoul")

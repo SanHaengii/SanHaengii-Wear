@@ -8,6 +8,7 @@ SanHaengii의 실제 센서 연동 전 검증을 위한 Wear OS 테스트 앱입
 - Kotlin
 - Compose 미사용, 기본 Android View UI
 - Wear OS Health Services SDK 사용
+- Galaxy Watch에서는 Samsung Health Sensor SDK를 통해 실제 SpO2 측정 시도
 - 외부 HTTP 라이브러리 미사용, `HttpURLConnection`으로 POST 전송
 - 기본 서버: `https://web-production-94f63.up.railway.app`
 - endpoint: `POST /health/data`
@@ -27,7 +28,7 @@ SanHaengii의 실제 센서 연동 전 검증을 위한 Wear OS 테스트 앱입
 }
 ```
 
-Health Services 에뮬레이터 synthetic data는 심박수와 걸음 관련 값 중심으로 테스트할 수 있습니다. SpO2는 앱 안에서 fake 값으로 채웁니다. 100에서 시작해 1초마다 1씩 감소하고, 90 다음에는 다시 100으로 돌아가 반복됩니다. 체온과 혈압은 일반 Wear OS Health Services 운동 데이터에서 안정적으로 제공되는 값이 아니라 현재 앱에서는 `null`로 보냅니다.
+Health Services 에뮬레이터 synthetic data는 심박수와 걸음 관련 값 중심으로 테스트할 수 있습니다. SpO2는 Galaxy Watch 실기기에서 Samsung Health Sensor SDK의 `SPO2_ON_DEMAND` 측정을 먼저 시도합니다. Samsung SDK가 앱에 포함되어 있지 않거나, 에뮬레이터/미지원 기기/측정 실패 상황이면 fake fallback으로 전환됩니다. fake SpO2는 100에서 시작해 1초마다 1씩 감소하고, 90 다음에는 다시 100으로 돌아가 반복됩니다. 체온과 혈압은 일반 Wear OS Health Services 운동 데이터에서 안정적으로 제공되는 값이 아니라 현재 앱에서는 `null`로 보냅니다.
 
 ## Android Studio에서 실행
 
@@ -63,13 +64,33 @@ Health Services 에뮬레이터 synthetic data는 심박수와 걸음 관련 값
 
 - Start HS exercise: Health Services walking exercise 시작
 - Stop HS exercise: exercise 종료
+- Measure SpO2: Galaxy Watch에서는 Samsung Health Sensor SDK로 실제 SpO2 1회 측정, fallback 상태에서는 fake SpO2를 한 단계 갱신
 - Send to backend: 현재 화면의 데이터를 백엔드로 전송
 - Start & send next: exercise를 시작하고 다음 Health Services update가 들어오면 바로 전송
-- Auto-send updates: ON/OFF 버튼. ON이면 Health Services update 또는 1초마다 갱신되는 fake SpO2 update를 받을 때마다 백엔드로 자동 전송
+- Auto-send updates: ON/OFF 버튼. ON이면 Health Services update, Samsung SpO2 측정 완료, 또는 1초마다 갱신되는 fake SpO2 update를 받을 때마다 백엔드로 자동 전송
 
-처음 시작할 때 `ACTIVITY_RECOGNITION`, `BODY_SENSORS` 또는 `READ_HEART_RATE` 권한 요청이 뜰 수 있습니다. 허용해야 Health Services 데이터를 받을 수 있습니다.
+처음 시작할 때 `ACTIVITY_RECOGNITION`, `BODY_SENSORS`, `READ_HEART_RATE` 또는 `READ_OXYGEN_SATURATION` 권한 요청이 뜰 수 있습니다. 허용해야 Health Services와 Samsung SpO2 데이터를 받을 수 있습니다.
 
 `measured_at`은 한국 시간대인 KST(`Asia/Seoul`, `+09:00`) 오프셋이 포함된 ISO 문자열로 전송됩니다.
+
+## Galaxy Watch 실제 SpO2 설정
+
+Samsung Health Sensor SDK는 Maven dependency가 아니라 AAR 파일로 프로젝트에 넣는 방식입니다. 이 저장소에는 라이선스와 배포 문제를 피하기 위해 AAR 파일을 커밋하지 않습니다.
+
+1. Samsung Developer에서 Samsung Health Sensor SDK를 내려받습니다.
+2. SDK 안의 `samsung-health-sensor-api.aar` 파일을 아래 위치에 복사합니다.
+
+```text
+app/libs/samsung-health-sensor-api.aar
+```
+
+3. Android Studio에서 Gradle sync 또는 rebuild를 실행합니다.
+4. Galaxy Watch4 이상, Wear OS Powered by Samsung 실기기에 앱을 설치합니다.
+5. 앱에서 권한을 허용한 뒤 `Measure SpO2`를 누릅니다.
+
+Samsung SpO2는 on-demand 측정이라 계속 흐르는 값이 아니라 1회 측정값입니다. 측정 중에는 워치를 손목에 밀착하고 팔을 움직이지 않아야 합니다. 완료되면 화면의 `SpO2 source`가 `Samsung Health Sensor SDK`로 표시되고, `spo2` 값이 백엔드 전송 payload에 들어갑니다.
+
+Samsung Health Sensor SDK는 에뮬레이터를 지원하지 않습니다. 에뮬레이터이거나 AAR 파일이 없거나 Health Platform 연결/권한/측정이 실패하면 앱은 자동으로 fake fallback을 사용합니다.
 
 ## 에뮬레이터 synthetic data 테스트
 
