@@ -20,14 +20,14 @@ SanHaengii의 실제 센서 연동 전 검증을 위한 Wear OS 테스트 앱입
   "heart_rate": 120,
   "steps": 800,
   "calories": 12.4,
-  "spo2": null,
+  "spo2": 98.0,
   "body_temp": null,
   "blood_pressure_systolic": null,
   "blood_pressure_diastolic": null
 }
 ```
 
-Health Services 에뮬레이터 synthetic data는 심박수와 걸음 관련 값 중심으로 테스트할 수 있습니다. SpO2, 체온, 혈압은 일반 Wear OS Health Services 운동 데이터에서 안정적으로 제공되는 값이 아니라 현재 앱에서는 `null`로 보냅니다.
+Health Services 에뮬레이터 synthetic data는 심박수와 걸음 관련 값 중심으로 테스트할 수 있습니다. SpO2는 앱 안에서 fake 값으로 채웁니다. 100에서 시작해 1초마다 1씩 감소하고, 90 다음에는 다시 100으로 돌아가 반복됩니다. 체온과 혈압은 일반 Wear OS Health Services 운동 데이터에서 안정적으로 제공되는 값이 아니라 현재 앱에서는 `null`로 보냅니다.
 
 ## Android Studio에서 실행
 
@@ -65,7 +65,7 @@ Health Services 에뮬레이터 synthetic data는 심박수와 걸음 관련 값
 - Stop HS exercise: exercise 종료
 - Send to backend: 현재 화면의 데이터를 백엔드로 전송
 - Start & send next: exercise를 시작하고 다음 Health Services update가 들어오면 바로 전송
-- Auto-send updates: ON/OFF 버튼. ON이면 Health Services update를 받을 때마다 백엔드로 자동 전송
+- Auto-send updates: ON/OFF 버튼. ON이면 Health Services update 또는 1초마다 갱신되는 fake SpO2 update를 받을 때마다 백엔드로 자동 전송
 
 처음 시작할 때 `ACTIVITY_RECOGNITION`, `BODY_SENSORS` 또는 `READ_HEART_RATE` 권한 요청이 뜰 수 있습니다. 허용해야 Health Services 데이터를 받을 수 있습니다.
 

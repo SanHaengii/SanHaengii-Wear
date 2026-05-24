@@ -124,7 +124,16 @@ class MainActivity : Activity() {
     private var isSending = false
     private var sendOnNextUpdate = false
     private var autoSendEachUpdate = false
+    private var nextFakeSpo2 = 100
+    private var lastFakeSpo2: Double? = null
     private var supportedDataTypes = DEFAULT_DATA_TYPES
+
+    private val fakeSpo2Runnable = object : Runnable {
+        override fun run() {
+            updateFakeSpo2(sendAfterUpdate = autoSendEachUpdate)
+            mainHandler.postDelayed(this, SPO2_TICK_MS)
+        }
+    }
 
     private val exerciseUpdateCallback = object : ExerciseUpdateCallback {
         override fun onExerciseUpdateReceived(update: ExerciseUpdate) {
@@ -177,12 +186,15 @@ class MainActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(createContentView())
+        updateFakeSpo2(sendAfterUpdate = false)
         renderPayload()
         updateExerciseButtons()
         refreshCapabilities()
+        mainHandler.postDelayed(fakeSpo2Runnable, SPO2_TICK_MS)
     }
 
     override fun onDestroy() {
+        mainHandler.removeCallbacks(fakeSpo2Runnable)
         if (isExerciseRunning) {
             exerciseClient.clearUpdateCallbackAsync(exerciseUpdateCallback)
             exerciseClient.endExerciseAsync()
@@ -383,11 +395,37 @@ class MainActivity : Activity() {
             heartRate = heartRate,
             steps = steps,
             calories = calories,
-            spo2 = null,
+            spo2 = lastFakeSpo2,
             bodyTemp = null,
             bloodPressureSystolic = null,
             bloodPressureDiastolic = null,
         )
+    }
+
+    private fun updateFakeSpo2(sendAfterUpdate: Boolean) {
+        val spo2 = nextFakeSpo2.toDouble()
+        lastFakeSpo2 = spo2
+        nextFakeSpo2 = if (nextFakeSpo2 <= MIN_FAKE_SPO2) {
+            MAX_FAKE_SPO2
+        } else {
+            nextFakeSpo2 - 1
+        }
+
+        currentPayload = currentPayload.copy(
+            measuredAt = nowKstIsoString(),
+            spo2 = spo2,
+        )
+        renderPayload()
+
+        if (!sendAfterUpdate) {
+            return
+        }
+
+        if (isSending) {
+            appendResult("Auto-send skipped because a previous request is still running.")
+        } else {
+            sendCurrentPayload()
+        }
     }
 
     private fun sendCurrentPayload() {
@@ -575,6 +613,9 @@ class MainActivity : Activity() {
     companion object {
         private const val HEALTH_SERVICES_PERMISSION_REQUEST = 30
         private const val PERMISSION_READ_HEART_RATE = "android.permission.health.READ_HEART_RATE"
+        private const val SPO2_TICK_MS = 1_000L
+        private const val MAX_FAKE_SPO2 = 100
+        private const val MIN_FAKE_SPO2 = 90
 
         private val DEFAULT_DATA_TYPES = setOf(
             DataType.HEART_RATE_BPM,
