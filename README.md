@@ -1,30 +1,33 @@
 # Wear Health Sender
 
-SanHaengii의 실제 센서 연동 전 검증을 위한 Wear OS 테스트 앱입니다. 워치 에뮬레이터에서 fake 생체 데이터를 만들고 `POST /health/data`로 백엔드에 전송합니다.
+SanHaengii의 실제 센서 연동 전 검증을 위한 Wear OS 테스트 앱입니다. 이 브랜치는 Wear OS의 Health Services를 사용해 에뮬레이터 또는 워치에서 운동 데이터를 받고, `POST /health/data`로 백엔드에 전송합니다.
 
 ## 구성
 
 - Native Android / Wear OS 프로젝트
 - Kotlin
 - Compose 미사용, 기본 Android View UI
+- Wear OS Health Services SDK 사용
 - 외부 HTTP 라이브러리 미사용, `HttpURLConnection`으로 POST 전송
 - 기본 서버: `https://web-production-94f63.up.railway.app`
 - endpoint: `POST /health/data`
 
-전송 JSON 예시:
+전송 JSON 형태:
 
 ```json
 {
   "measured_at": "2026-05-23T12:00:00Z",
-  "heart_rate": 92,
-  "steps": 1200,
-  "calories": 35.2,
-  "spo2": 98.0,
-  "body_temp": 36.5,
-  "blood_pressure_systolic": 120,
-  "blood_pressure_diastolic": 78
+  "heart_rate": 120,
+  "steps": 800,
+  "calories": 12.4,
+  "spo2": null,
+  "body_temp": null,
+  "blood_pressure_systolic": null,
+  "blood_pressure_diastolic": null
 }
 ```
+
+Health Services 에뮬레이터 synthetic data는 심박수와 걸음 관련 값 중심으로 테스트할 수 있습니다. SpO2, 체온, 혈압은 일반 Wear OS Health Services 운동 데이터에서 안정적으로 제공되는 값이 아니라 현재 앱에서는 `null`로 보냅니다.
 
 ## Android Studio에서 실행
 
@@ -43,7 +46,7 @@ SanHaengii의 실제 센서 연동 전 검증을 위한 Wear OS 테스트 앱입
 
 1. Android Studio 오른쪽 위 Device Manager를 엽니다.
 2. `+` 버튼을 누르고 Wear OS 기기를 선택합니다. 예: Pixel Watch 계열
-3. Wear OS 시스템 이미지를 선택합니다. 설치가 필요하면 Download를 누릅니다.
+3. Wear OS 시스템 이미지를 선택합니다. 가능하면 Wear OS 4 이상 이미지를 권장합니다.
 4. AVD 이름을 정하고 Finish를 누릅니다.
 5. 생성된 Wear OS 에뮬레이터를 실행한 뒤 Android Studio의 Run 대상에서 선택합니다.
 
@@ -53,14 +56,52 @@ SanHaengii의 실제 센서 연동 전 검증을 위한 Wear OS 테스트 앱입
 
 - Backend URL: 전송할 백엔드 base URL
 - JWT token: `Authorization: Bearer <token>`으로 보낼 JWT
-- fake 데이터 미리보기
+- Health Services에서 받은 데이터 미리보기
 - HTTP status code와 response body
 
 버튼:
 
-- Generate fake data: fake 생체 데이터만 새로 생성
+- Start HS exercise: Health Services walking exercise 시작
+- Stop HS exercise: exercise 종료
 - Send to backend: 현재 화면의 데이터를 백엔드로 전송
-- Generate & send: 새 데이터를 생성한 뒤 바로 전송
+- Start & send next: exercise를 시작하고 다음 Health Services update가 들어오면 바로 전송
+
+처음 시작할 때 `ACTIVITY_RECOGNITION`, `BODY_SENSORS` 또는 `READ_HEART_RATE` 권한 요청이 뜰 수 있습니다. 허용해야 Health Services 데이터를 받을 수 있습니다.
+
+## 에뮬레이터 synthetic data 테스트
+
+앱을 실행한 뒤 `Start HS exercise`를 누릅니다. 그 다음 PC 터미널에서 아래 명령을 실행해 synthetic walking 데이터를 발생시킬 수 있습니다.
+
+Wear OS 4 이상에서는 Health Services synthetic data가 Health Services lifecycle과 통합되어 있습니다. 필요하면 아래 walking broadcast를 함께 사용합니다.
+
+```powershell
+adb shell am broadcast -a "whs.synthetic.user.START_WALKING" com.google.android.wearable.healthservices
+```
+
+Wear OS 3 에뮬레이터는 synthetic provider를 먼저 켜야 할 수 있습니다.
+
+```powershell
+adb shell am broadcast -a "whs.USE_SYNTHETIC_PROVIDERS" com.google.android.wearable.healthservices
+adb shell am broadcast -a "whs.synthetic.user.START_WALKING" com.google.android.wearable.healthservices
+```
+
+커스텀 심박수로 테스트하려면:
+
+```powershell
+adb shell am broadcast -a "whs.synthetic.user.START_EXERCISE" --ei exercise_options_heart_rate 90 --ef exercise_options_average_speed 1.2 --ez exercise_options_use_location true com.google.android.wearable.healthservices
+```
+
+synthetic exercise를 멈추려면:
+
+```powershell
+adb shell am broadcast -a "whs.synthetic.user.STOP_EXERCISE" com.google.android.wearable.healthservices
+```
+
+Wear OS 3에서 실제 센서 provider로 되돌리려면:
+
+```powershell
+adb shell am broadcast -a "whs.USE_SENSOR_PROVIDERS" com.google.android.wearable.healthservices
+```
 
 ## JWT 토큰 설정
 

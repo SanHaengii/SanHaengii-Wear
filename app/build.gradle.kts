@@ -5,6 +5,12 @@ plugins {
     id("org.jetbrains.kotlin.android")
 }
 
+dependencies {
+    implementation("androidx.health:health-services-client:1.1.0-rc02")
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-guava:1.9.0")
+}
+
 val localProperties = Properties()
 val localPropertiesFile = rootProject.file("local.properties")
 if (localPropertiesFile.exists()) {
