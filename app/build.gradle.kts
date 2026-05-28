@@ -3,13 +3,7 @@ import java.util.Properties
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
-}
-
-dependencies {
-    implementation(fileTree(mapOf("dir" to "libs", "include" to listOf("*.aar", "*.jar"))))
-    implementation("androidx.health:health-services-client:1.1.0-rc02")
-    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
-    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-guava:1.9.0")
+    id("org.jetbrains.kotlin.plugin.compose")
 }
 
 val localProperties = Properties()
@@ -24,18 +18,18 @@ fun String.asBuildConfigString(): String {
 
 val healthApiBaseUrl = localProperties.getProperty(
     "HEALTH_API_BASE_URL",
-    "https://web-production-94f63.up.railway.app",
+    "https://web-production-94f63.up.railway.app"
 )
 val healthApiToken = localProperties.getProperty("HEALTH_API_TOKEN", "")
 
 android {
     namespace = "com.sanhaengii.wearhealthsender"
-    compileSdk = 36
+    compileSdk = 36 // 🚀 수정: 안정적인 34 버전으로 하향
 
     defaultConfig {
         applicationId = "com.sanhaengii.wearhealthsender"
         minSdk = 30
-        targetSdk = 36
+        targetSdk = 34 // 🚀 수정
         versionCode = 1
         versionName = "0.1.0"
 
@@ -45,7 +39,10 @@ android {
 
     buildFeatures {
         buildConfig = true
+        compose = true
     }
+
+    // 🚀 수정: 코틀린 2.0부터는 에러를 내는 composeOptions 블록 삭제됨
 
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
@@ -54,5 +51,34 @@ android {
 
     kotlinOptions {
         jvmTarget = "17"
+        freeCompilerArgs = freeCompilerArgs + listOf(
+            "-Xopt-in=androidx.compose.material3.ExperimentalMaterial3Api"
+        )
     }
+}
+
+// 🚀 수정: dependencies 블록을 맨 아래로 이동
+dependencies {
+    implementation(fileTree(mapOf("dir" to "libs", "include" to listOf("*.aar", "*.jar"))))
+
+    // 센서 연동 (Health Services)
+    implementation("androidx.health:health-services-client:1.1.0-rc02")
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-guava:1.9.0")
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-play-services:1.9.0")
+
+    // 기본 Compose
+    implementation("androidx.activity:activity-compose:1.8.0")
+    implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.7.0")
+    implementation("androidx.compose.ui:ui:1.6.1")
+    implementation("androidx.compose.ui:ui-tooling-preview:1.6.1")
+    debugImplementation("androidx.compose.ui:ui-tooling:1.6.1")
+    implementation("androidx.compose.material:material-icons-extended:1.6.1")
+
+    // 🚀 수정: 스마트워치(Wear OS) 전용 UI 부품 추가
+    implementation("androidx.wear.compose:compose-material:1.3.0")
+    implementation("androidx.wear.compose:compose-foundation:1.3.0")
+
+    // 구글 플레이 서비스 (웨어러블 통신용)
+    implementation("com.google.android.gms:play-services-wearable:18.1.0")
 }

@@ -6,3 +6,35 @@ local.properties
 *.iml
 app/libs/*.aar
 app/libs/*.jar
+
+# Memory dumps
+*.hprof
+
+# Kotlin
+.kotlin/
+
+# macOS
+.DS_Store
+
+# Android Studio / IntelliJ
+*.jks
+*.keystore
+*.apk
+*.ap_
+*.dex
+*.class
+bin/
+gen/
+captures/
+.externalNativeBuild
+.cxx/
+
+# Gradle
+.gradle/
+build/
+
+# Local configuration
+local.properties
+
+# 안드로이드 메모리 덤프 파일 무시
+*.hprof

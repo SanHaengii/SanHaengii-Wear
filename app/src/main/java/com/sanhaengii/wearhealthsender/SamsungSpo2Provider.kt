@@ -114,7 +114,7 @@ class SamsungSpo2Provider(
 
     private fun handleConnectionSuccess(loadedSdk: SamsungSpo2Sdk) {
         runCatching {
-            val service = healthTrackingService ?: error("HealthTrackingService is null")
+            val service = healthTrackingService ?: throw IllegalStateException("HealthTrackingService is null")
             val trackerType = loadedSdk.spo2TrackerType()
             val capability = service.javaClass
                 .getMethod("getTrackingCapability")
@@ -124,7 +124,7 @@ class SamsungSpo2Provider(
                 .invoke(capability) as? Collection<*>
 
             if (supportedTrackers?.any { it == trackerType || it.toString() == trackerType.toString() } != true) {
-                error("SPO2_ON_DEMAND is not supported on this watch.")
+                throw IllegalStateException("SPO2_ON_DEMAND is not supported on this watch.")
             }
 
             spo2Tracker = service.javaClass

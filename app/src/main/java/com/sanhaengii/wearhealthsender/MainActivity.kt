@@ -2,6 +2,7 @@ package com.sanhaengii.wearhealthsender
 
 import android.Manifest
 import android.app.Activity
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Color
 import android.graphics.Typeface
@@ -28,6 +29,11 @@ import androidx.health.services.client.data.ExerciseEvent
 import androidx.health.services.client.data.ExerciseLapSummary
 import androidx.health.services.client.data.ExerciseType
 import androidx.health.services.client.data.ExerciseUpdate
+import com.google.android.gms.wearable.DataClient
+import com.google.android.gms.wearable.MessageClient
+import com.google.android.gms.wearable.MessageEvent
+import com.google.android.gms.wearable.PutDataMapRequest
+import com.google.android.gms.wearable.Wearable
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -104,25 +110,31 @@ data class HealthServicesPayload(
     }
 }
 
-class MainActivity : Activity() {
+class MainActivity : Activity(), MessageClient.OnMessageReceivedListener {
     private val mainHandler = Handler(Looper.getMainLooper())
     private val activityScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private val exerciseClient by lazy { HealthServices.getClient(this).exerciseClient }
 
     private lateinit var baseUrlInput: EditText
     private lateinit var tokenInput: EditText
+    private lateinit var etaInput: EditText
+    private lateinit var distanceInput: EditText
     private lateinit var payloadText: TextView
     private lateinit var resultText: TextView
     private lateinit var startExerciseButton: Button
     private lateinit var stopExerciseButton: Button
     private lateinit var sendButton: Button
+    private lateinit var syncWatchButton: Button
     private lateinit var startAndSendButton: Button
     private lateinit var measureSpo2Button: Button
     private lateinit var autoSendButton: Button
+    private lateinit var finishRescueButton: Button
+    private lateinit var rescueLayout: LinearLayout
 
     private var currentPayload = HealthServicesPayload.empty()
     private var isExerciseRunning = false
     private var isSending = false
+    private var isRescueMode = false
     private var sendOnNextUpdate = false
     private var autoSendEachUpdate = false
     private var pendingPermissionAction = PendingPermissionAction.NONE
@@ -147,6 +159,9 @@ class MainActivity : Activity() {
                 currentPayload = payload
                 renderPayload()
                 appendResult("Health Services update received.")
+                
+                syncDataToWatch()
+
                 val shouldSend = sendOnNextUpdate || autoSendEachUpdate
                 if (sendOnNextUpdate) {
                     sendOnNextUpdate = false
@@ -195,6 +210,8 @@ class MainActivity : Activity() {
         updateExerciseButtons()
         refreshCapabilities()
         startSpo2Provider()
+        
+        Wearable.getMessageClient(this).addListener(this)
     }
 
     override fun onDestroy() {
@@ -204,31 +221,50 @@ class MainActivity : Activity() {
             exerciseClient.clearUpdateCallbackAsync(exerciseUpdateCallback)
             exerciseClient.endExerciseAsync()
         }
+        Wearable.getMessageClient(this).removeListener(this)
         activityScope.cancel()
         super.onDestroy()
     }
 
-    override fun onRequestPermissionsResult(
-        requestCode: Int,
-        permissions: Array<out String>,
-        grantResults: IntArray,
-    ) {
-        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
-        if (requestCode == HEALTH_SERVICES_PERMISSION_REQUEST) {
-            if (hasRequiredPermissions()) {
-                val action = pendingPermissionAction
-                pendingPermissionAction = PendingPermissionAction.NONE
-                appendResult("Health sensor permissions granted.")
-                when (action) {
-                    PendingPermissionAction.START_EXERCISE -> startExercise()
-                    PendingPermissionAction.MEASURE_SPO2 -> requestSpo2Measurement()
-                    PendingPermissionAction.NONE -> Unit
-                }
-            } else {
-                pendingPermissionAction = PendingPermissionAction.NONE
-                appendResult("Health sensor permissions were not granted.")
+    override fun onMessageReceived(messageEvent: MessageEvent) {
+        if (messageEvent.path == "/sos_triggered") {
+            mainHandler.post {
+                enterRescueMode()
             }
         }
+    }
+
+    private fun enterRescueMode() {
+        isRescueMode = true
+        rescueLayout.visibility = ViewGroup.VISIBLE
+        appendResult("🚨 SOS TRIGGERED FROM WATCH! Rescue protocol initiated.")
+    }
+
+    private fun finishRescueProtocol() {
+        isRescueMode = false
+        rescueLayout.visibility = ViewGroup.GONE
+        appendResult("✅ Rescue protocol finished. Notifying watch.")
+        
+        val putDataMapReq = PutDataMapRequest.create("/sos_status")
+        putDataMapReq.dataMap.putString("status", "finished")
+        putDataMapReq.dataMap.putLong("timestamp", System.currentTimeMillis())
+        val putDataReq = putDataMapReq.asPutDataRequest().setUrgent()
+        Wearable.getDataClient(this).putDataItem(putDataReq)
+    }
+
+    private fun syncDataToWatch() {
+        val eta = etaInput.text.toString().ifBlank { "-" }
+        val distance = distanceInput.text.toString().ifBlank { "-" }
+        val bpm = currentPayload.heartRate ?: 0
+
+        val putDataMapReq = PutDataMapRequest.create("/hiking_info")
+        putDataMapReq.dataMap.putString("eta", eta)
+        putDataMapReq.dataMap.putString("distance", distance)
+        putDataMapReq.dataMap.putInt("bpm", bpm)
+        putDataMapReq.dataMap.putLong("timestamp", System.currentTimeMillis())
+        
+        val putDataReq = putDataMapReq.asPutDataRequest().setUrgent()
+        Wearable.getDataClient(this).putDataItem(putDataReq)
     }
 
     private fun createContentView(): ScrollView {
@@ -238,6 +274,23 @@ class MainActivity : Activity() {
             setPadding(18.dp(), 16.dp(), 18.dp(), 24.dp())
             setBackgroundColor(Color.rgb(15, 23, 42))
         }
+
+        rescueLayout = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER
+            setPadding(16.dp(), 16.dp(), 16.dp(), 16.dp())
+            setBackgroundColor(Color.RED)
+            visibility = ViewGroup.GONE
+            
+            addView(text("🚨 구조 프로토콜 실행 중", 16f, bold = true))
+            addView(Space(this@MainActivity), LinearLayout.LayoutParams(1, 8.dp()))
+            finishRescueButton = button("구조 완료 및 워치 해제", Color.WHITE) {
+                finishRescueProtocol()
+            }
+            addView(finishRescueButton)
+        }
+        root.addView(rescueLayout, fullWidthParams())
+        root.addSpace(12)
 
         root.addView(text("SanHaengii", 18f, bold = true))
         root.addView(text("Wear Health Services sender", 12f, color = Color.rgb(203, 213, 225)))
@@ -253,6 +306,30 @@ class MainActivity : Activity() {
         root.addView(tokenInput)
 
         root.addSpace(12)
+        
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+        }
+        val col1 = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+            addView(label("ETA (min)"))
+            etaInput = input("30")
+            addView(etaInput)
+        }
+        val col2 = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+            setPadding(8.dp(), 0, 0, 0)
+            addView(label("Distance (km)"))
+            distanceInput = input("2.5")
+            addView(distanceInput)
+        }
+        row.addView(col1)
+        row.addView(col2)
+        root.addView(row)
+
+        root.addSpace(12)
         payloadText = text("", 12f, color = Color.rgb(226, 232, 240)).apply {
             setPadding(12.dp(), 10.dp(), 12.dp(), 10.dp())
             setBackgroundColor(Color.rgb(30, 41, 59))
@@ -260,6 +337,14 @@ class MainActivity : Activity() {
         root.addView(payloadText, fullWidthParams())
 
         root.addSpace(10)
+        
+        syncWatchButton = button("Sync to Watch Now", Color.rgb(167, 139, 250)) {
+            syncDataToWatch()
+            appendResult("Manually synced hiking info to watch.")
+        }
+        root.addView(syncWatchButton)
+        root.addSpace(8)
+
         startExerciseButton = button("Start HS exercise", Color.rgb(56, 189, 248)) {
             startExercise()
         }
@@ -296,6 +381,16 @@ class MainActivity : Activity() {
             toggleAutoSendUpdates()
         }
         root.addView(autoSendButton)
+
+        root.addSpace(8)
+        val openDashboardButton = button("Open Dashboard (Compose)", Color.rgb(99, 102, 241)) {
+            val intent = Intent(this@MainActivity, ComposeMainActivity::class.java)
+            intent.putExtra("bpm", currentPayload.heartRate ?: 0)
+            intent.putExtra("eta", etaInput.text.toString())
+            intent.putExtra("distance", distanceInput.text.toString())
+            startActivity(intent)
+        }
+        root.addView(openDashboardButton)
 
         root.addSpace(12)
         resultText = text(
@@ -499,6 +594,10 @@ class MainActivity : Activity() {
     private fun updateFakeSpo2(sendAfterUpdate: Boolean) {
         val spo2 = nextFakeSpo2.toDouble()
         lastSpo2 = spo2
+        nextFakeFakeSpo2(sendAfterUpdate)
+    }
+
+    private fun nextFakeFakeSpo2(sendAfterUpdate: Boolean) {
         nextFakeSpo2 = if (nextFakeSpo2 <= MIN_FAKE_SPO2) {
             MAX_FAKE_SPO2
         } else {
@@ -507,7 +606,7 @@ class MainActivity : Activity() {
 
         currentPayload = currentPayload.copy(
             measuredAt = nowKstIsoString(),
-            spo2 = spo2,
+            spo2 = lastSpo2,
         )
         renderPayload()
 
@@ -680,7 +779,7 @@ class MainActivity : Activity() {
             setText(value)
             textSize = 11f
             setSingleLine(true)
-            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD
+            inputType = InputType.TYPE_CLASS_TEXT
             setTextColor(Color.rgb(15, 23, 42))
             setHintTextColor(Color.rgb(100, 116, 139))
             setBackgroundColor(Color.rgb(241, 245, 249))
@@ -714,6 +813,29 @@ class MainActivity : Activity() {
 
     private fun Int.dp(): Int {
         return (this * resources.displayMetrics.density).roundToInt()
+    }
+
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<out String>,
+        grantResults: IntArray,
+    ) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == HEALTH_SERVICES_PERMISSION_REQUEST) {
+            if (hasRequiredPermissions()) {
+                val action = pendingPermissionAction
+                pendingPermissionAction = PendingPermissionAction.NONE
+                appendResult("Health sensor permissions granted.")
+                when (action) {
+                    PendingPermissionAction.START_EXERCISE -> startExercise()
+                    PendingPermissionAction.MEASURE_SPO2 -> requestSpo2Measurement()
+                    PendingPermissionAction.NONE -> Unit
+                }
+            } else {
+                pendingPermissionAction = PendingPermissionAction.NONE
+                appendResult("Health sensor permissions were not granted.")
+            }
+        }
     }
 
     companion object {
