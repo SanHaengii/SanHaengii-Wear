@@ -58,8 +58,9 @@ data class HealthServicesPayload(
     val bloodPressureSystolic: Int?,
     val bloodPressureDiastolic: Int?,
 ) {
-    fun toJson(): JSONObject {
+    fun toJson(userId: Long): JSONObject {
         return JSONObject()
+            .put("user_id", userId)
             .put("measured_at", measuredAt)
             .putNullable("heart_rate", heartRate)
             .putNullable("steps", steps)
@@ -70,8 +71,8 @@ data class HealthServicesPayload(
             .putNullable("blood_pressure_diastolic", bloodPressureDiastolic)
     }
 
-    fun toRequestBody(): String {
-        return toJson().toString()
+    fun toRequestBody(userId: Long): String {
+        return toJson(userId).toString()
     }
 
     fun toDisplayText(): String {
@@ -84,6 +85,32 @@ data class HealthServicesPayload(
             Temp: ${bodyTemp.display("C")}
             At: $measuredAt
         """.trimIndent()
+    }
+
+    fun mergeWith(update: HealthServicesPayload): HealthServicesPayload {
+        return copy(
+            measuredAt = update.measuredAt,
+            heartRate = update.heartRate ?: heartRate,
+            steps = update.steps ?: steps,
+            calories = update.calories ?: calories,
+            spo2 = update.spo2 ?: spo2,
+            bodyTemp = update.bodyTemp ?: bodyTemp,
+            bloodPressureSystolic = update.bloodPressureSystolic ?: bloodPressureSystolic,
+            bloodPressureDiastolic = update.bloodPressureDiastolic ?: bloodPressureDiastolic,
+        )
+    }
+
+    fun hasCollectedRequiredValues(): Boolean {
+        return heartRate != null && steps != null && calories != null && spo2 != null
+    }
+
+    fun missingRequiredFields(): String {
+        return listOfNotNull(
+            "heart_rate".takeIf { heartRate == null },
+            "steps".takeIf { steps == null },
+            "calories".takeIf { calories == null },
+            "spo2".takeIf { spo2 == null },
+        ).joinToString()
     }
 
     private fun displayBloodPressure(): String {
@@ -117,6 +144,7 @@ class MainActivity : Activity(), MessageClient.OnMessageReceivedListener {
 
     private lateinit var baseUrlInput: EditText
     private lateinit var tokenInput: EditText
+    private lateinit var userIdInput: EditText
     private lateinit var etaInput: EditText
     private lateinit var distanceInput: EditText
     private lateinit var payloadText: TextView
@@ -135,20 +163,32 @@ class MainActivity : Activity(), MessageClient.OnMessageReceivedListener {
     private var isExerciseRunning = false
     private var isSending = false
     private var isRescueMode = false
+    private var isHikingActive = false
+    private var isPeriodicSendingEnabled = false
     private var sendOnNextUpdate = false
-    private var autoSendEachUpdate = false
     private var pendingPermissionAction = PendingPermissionAction.NONE
     private var nextFakeSpo2 = 100
     private var lastSpo2: Double? = null
     private var isFakeSpo2Active = false
     private var spo2SourceText = "initializing"
     private var samsungSpo2Provider: SamsungSpo2Provider? = null
+    private var samsungSkinTemperatureProvider: SamsungSkinTemperatureProvider? = null
     private var supportedDataTypes = DEFAULT_DATA_TYPES
 
     private val fakeSpo2Runnable = object : Runnable {
         override fun run() {
-            updateFakeSpo2(sendAfterUpdate = autoSendEachUpdate)
+            updateFakeSpo2()
             mainHandler.postDelayed(this, SPO2_TICK_MS)
+        }
+    }
+
+    private val periodicHealthSendRunnable = object : Runnable {
+        override fun run() {
+            if (!isHikingActive || !isPeriodicSendingEnabled) {
+                return
+            }
+            sendCollectedPayload(requireHiking = true)
+            mainHandler.postDelayed(this, HEALTH_SEND_INTERVAL_MS)
         }
     }
 
@@ -156,21 +196,16 @@ class MainActivity : Activity(), MessageClient.OnMessageReceivedListener {
         override fun onExerciseUpdateReceived(update: ExerciseUpdate) {
             val payload = payloadFromMetrics(update.latestMetrics)
             mainHandler.post {
-                currentPayload = payload
+                currentPayload = currentPayload.mergeWith(payload)
                 renderPayload()
                 appendResult("Health Services update received.")
                 
                 syncDataToWatch()
 
-                val shouldSend = sendOnNextUpdate || autoSendEachUpdate
                 if (sendOnNextUpdate) {
-                    sendOnNextUpdate = false
-                }
-                if (shouldSend) {
-                    if (isSending) {
-                        appendResult("Auto-send skipped because a previous request is still running.")
-                    } else {
-                        sendCurrentPayload()
+                    val sent = sendCollectedPayload(requireHiking = true)
+                    if (sendOnNextUpdate && sent) {
+                        sendOnNextUpdate = false
                     }
                 }
             }
@@ -210,13 +245,16 @@ class MainActivity : Activity(), MessageClient.OnMessageReceivedListener {
         updateExerciseButtons()
         refreshCapabilities()
         startSpo2Provider()
+        startSkinTemperatureProvider()
         
         Wearable.getMessageClient(this).addListener(this)
     }
 
     override fun onDestroy() {
         mainHandler.removeCallbacks(fakeSpo2Runnable)
+        mainHandler.removeCallbacks(periodicHealthSendRunnable)
         samsungSpo2Provider?.stop()
+        samsungSkinTemperatureProvider?.stop()
         if (isExerciseRunning) {
             exerciseClient.clearUpdateCallbackAsync(exerciseUpdateCallback)
             exerciseClient.endExerciseAsync()
@@ -305,6 +343,11 @@ class MainActivity : Activity(), MessageClient.OnMessageReceivedListener {
         tokenInput = input(BuildConfig.HEALTH_API_TOKEN)
         root.addView(tokenInput)
 
+        root.addSpace(8)
+        root.addView(label("User ID"))
+        userIdInput = input(BuildConfig.HEALTH_API_USER_ID)
+        root.addView(userIdInput)
+
         root.addSpace(12)
         
         val row = LinearLayout(this).apply {
@@ -345,13 +388,13 @@ class MainActivity : Activity(), MessageClient.OnMessageReceivedListener {
         root.addView(syncWatchButton)
         root.addSpace(8)
 
-        startExerciseButton = button("Start HS exercise", Color.rgb(56, 189, 248)) {
+        startExerciseButton = button("Start hiking", Color.rgb(56, 189, 248)) {
             startExercise()
         }
         root.addView(startExerciseButton)
 
         root.addSpace(8)
-        stopExerciseButton = button("Stop HS exercise", Color.rgb(148, 163, 184)) {
+        stopExerciseButton = button("Stop hiking", Color.rgb(148, 163, 184)) {
             stopExercise()
         }
         root.addView(stopExerciseButton)
@@ -363,8 +406,8 @@ class MainActivity : Activity(), MessageClient.OnMessageReceivedListener {
         root.addView(measureSpo2Button)
 
         root.addSpace(8)
-        sendButton = button("Send to backend", Color.rgb(34, 197, 94)) {
-            sendCurrentPayload()
+        sendButton = button("Send once", Color.rgb(34, 197, 94)) {
+            sendCollectedPayload(requireHiking = true)
         }
         root.addView(sendButton)
 
@@ -377,8 +420,8 @@ class MainActivity : Activity(), MessageClient.OnMessageReceivedListener {
         root.addView(startAndSendButton)
 
         root.addSpace(8)
-        autoSendButton = button("Auto-send updates: OFF", Color.rgb(148, 163, 184)) {
-            toggleAutoSendUpdates()
+        autoSendButton = button("3s backend send: OFF", Color.rgb(148, 163, 184)) {
+            togglePeriodicSending()
         }
         root.addView(autoSendButton)
 
@@ -457,8 +500,12 @@ class MainActivity : Activity(), MessageClient.OnMessageReceivedListener {
             result
                 .onSuccess {
                     isExerciseRunning = true
+                    isHikingActive = true
+                    currentPayload = HealthServicesPayload.empty().copy(spo2 = lastSpo2)
+                    startPeriodicSending()
                     updateExerciseButtons()
-                    appendResult("Started Health Services walking exercise.")
+                    renderPayload()
+                    appendResult("Started hiking. Health data will POST every 3 seconds.")
                 }
                 .onFailure {
                     appendResult("Could not start Health Services exercise: ${it.message ?: it.javaClass.simpleName}")
@@ -482,9 +529,11 @@ class MainActivity : Activity(), MessageClient.OnMessageReceivedListener {
             result
                 .onSuccess {
                     isExerciseRunning = false
+                    isHikingActive = false
                     sendOnNextUpdate = false
+                    stopPeriodicSending()
                     updateExerciseButtons()
-                    appendResult("Stopped Health Services exercise.")
+                    appendResult("Stopped hiking and 3-second health data sending.")
                 }
                 .onFailure { appendResult("Could not stop Health Services exercise: ${it.message ?: it.javaClass.simpleName}") }
         }
@@ -542,7 +591,7 @@ class MainActivity : Activity(), MessageClient.OnMessageReceivedListener {
         }
 
         if (isFakeSpo2Active) {
-            updateFakeSpo2(sendAfterUpdate = autoSendEachUpdate)
+            updateFakeSpo2()
             appendResult("Fake SpO2 fallback updated.")
             return
         }
@@ -565,14 +614,6 @@ class MainActivity : Activity(), MessageClient.OnMessageReceivedListener {
         )
         renderPayload()
         appendResult("Samsung SpO2 measured: ${spo2.roundToInt()}%.")
-
-        if (autoSendEachUpdate) {
-            if (isSending) {
-                appendResult("Auto-send skipped because a previous request is still running.")
-            } else {
-                sendCurrentPayload()
-            }
-        }
     }
 
     private fun activateFakeSpo2Fallback(reason: String) {
@@ -587,17 +628,13 @@ class MainActivity : Activity(), MessageClient.OnMessageReceivedListener {
         spo2SourceText = "fake fallback"
         updateSpo2Button()
         appendResult("$reason Using fake SpO2 fallback.")
-        updateFakeSpo2(sendAfterUpdate = false)
+        updateFakeSpo2()
         mainHandler.postDelayed(fakeSpo2Runnable, SPO2_TICK_MS)
     }
 
-    private fun updateFakeSpo2(sendAfterUpdate: Boolean) {
+    private fun updateFakeSpo2() {
         val spo2 = nextFakeSpo2.toDouble()
         lastSpo2 = spo2
-        nextFakeFakeSpo2(sendAfterUpdate)
-    }
-
-    private fun nextFakeFakeSpo2(sendAfterUpdate: Boolean) {
         nextFakeSpo2 = if (nextFakeSpo2 <= MIN_FAKE_SPO2) {
             MAX_FAKE_SPO2
         } else {
@@ -609,30 +646,53 @@ class MainActivity : Activity(), MessageClient.OnMessageReceivedListener {
             spo2 = lastSpo2,
         )
         renderPayload()
+    }
 
-        if (!sendAfterUpdate) {
-            return
+    private fun sendCollectedPayload(requireHiking: Boolean): Boolean {
+        if (requireHiking && !isHikingActive) {
+            appendResult("Start hiking before sending health data.")
+            return false
         }
 
         if (isSending) {
-            appendResult("Auto-send skipped because a previous request is still running.")
-        } else {
-            sendCurrentPayload()
+            appendResult("Send skipped because a previous request is still running.")
+            return false
         }
+
+        if (!currentPayload.hasCollectedRequiredValues()) {
+            appendResult("Waiting for collected payload. Missing: ${currentPayload.missingRequiredFields()}")
+            return false
+        }
+
+        sendCurrentPayload()
+        return true
     }
 
     private fun sendCurrentPayload() {
         val baseUrl = baseUrlInput.text.toString().trim().trimEnd('/')
         val token = tokenInput.text.toString().trim()
+        val userId = userIdInput.text.toString().trim().toLongOrNull()
 
         if (baseUrl.isBlank()) {
             appendResult("Backend URL is empty.")
             return
         }
 
+        if (userId == null || userId <= 0L) {
+            appendResult("User ID must be a positive number.")
+            return
+        }
+
         setSending(true)
 
-        val requestBody = currentPayload.toRequestBody()
+        val payloadForSend = currentPayload.copy(
+            measuredAt = nowKstIsoString(),
+            bodyTemp = currentPayload.bodyTemp ?: DEFAULT_BODY_TEMP,
+        )
+        currentPayload = payloadForSend
+        renderPayload()
+
+        val requestBody = payloadForSend.toRequestBody(userId)
         appendResult("POST $baseUrl/health/data")
 
         Thread {
@@ -685,14 +745,21 @@ class MainActivity : Activity(), MessageClient.OnMessageReceivedListener {
     }
 
     private fun renderPayload() {
-        payloadText.text = "${currentPayload.toDisplayText()}\nSpO2 source: $spo2SourceText"
+        val sendState = if (isHikingActive && isPeriodicSendingEnabled) "ON" else "OFF"
+        payloadText.text = """
+            ${currentPayload.toDisplayText()}
+            User ID: ${userIdInput.text.toString().ifBlank { "-" }}
+            Hiking: ${if (isHikingActive) "active" else "inactive"}
+            3s backend send: $sendState
+            SpO2 source: $spo2SourceText
+        """.trimIndent()
     }
 
     private fun setSending(isSending: Boolean) {
         this.isSending = isSending
         sendButton.isEnabled = !isSending
         startAndSendButton.isEnabled = !isSending
-        sendButton.text = if (isSending) "Sending..." else "Send to backend"
+        sendButton.text = if (isSending) "Sending..." else "Send once"
     }
 
     private fun updateExerciseButtons() {
@@ -711,21 +778,72 @@ class MainActivity : Activity(), MessageClient.OnMessageReceivedListener {
         }
     }
 
-    private fun toggleAutoSendUpdates() {
-        autoSendEachUpdate = !autoSendEachUpdate
-        updateAutoSendButton()
-        appendResult("Auto-send updates: ${if (autoSendEachUpdate) "ON" else "OFF"}")
+    private fun togglePeriodicSending() {
+        if (!isHikingActive) {
+            appendResult("Start hiking before enabling 3-second backend sending.")
+            startExercise()
+            return
+        }
+
+        if (isPeriodicSendingEnabled) {
+            stopPeriodicSending()
+        } else {
+            startPeriodicSending()
+        }
+    }
+
+    private fun startSkinTemperatureProvider() {
+        appendResult("Body temp provider: trying Samsung skin temperature tracker.")
+        val provider = SamsungSkinTemperatureProvider(
+            context = this,
+            mainHandler = mainHandler,
+            onReading = { temperature ->
+                currentPayload = currentPayload.copy(
+                    measuredAt = nowKstIsoString(),
+                    bodyTemp = temperature,
+                )
+                renderPayload()
+                appendResult("Samsung skin temperature measured: $temperature C.")
+            },
+            onStatus = ::appendResult,
+            onUnavailable = { message ->
+                appendResult("$message Using body_temp fallback when sending.")
+            },
+        )
+        samsungSkinTemperatureProvider = provider
+        if (!provider.start()) {
+            samsungSkinTemperatureProvider = null
+        }
     }
 
     private fun updateAutoSendButton() {
-        autoSendButton.text = if (autoSendEachUpdate) {
-            "Auto-send updates: ON"
+        autoSendButton.text = if (isPeriodicSendingEnabled) {
+            "3s backend send: ON"
         } else {
-            "Auto-send updates: OFF"
+            "3s backend send: OFF"
         }
         autoSendButton.setBackgroundColor(
-            if (autoSendEachUpdate) Color.rgb(251, 146, 60) else Color.rgb(148, 163, 184),
+            if (isPeriodicSendingEnabled) Color.rgb(251, 146, 60) else Color.rgb(148, 163, 184),
         )
+    }
+
+    private fun startPeriodicSending() {
+        if (!isHikingActive) {
+            return
+        }
+
+        isPeriodicSendingEnabled = true
+        mainHandler.removeCallbacks(periodicHealthSendRunnable)
+        mainHandler.postDelayed(periodicHealthSendRunnable, HEALTH_SEND_INTERVAL_MS)
+        updateAutoSendButton()
+        renderPayload()
+    }
+
+    private fun stopPeriodicSending() {
+        isPeriodicSendingEnabled = false
+        mainHandler.removeCallbacks(periodicHealthSendRunnable)
+        updateAutoSendButton()
+        renderPayload()
     }
 
     private fun appendResult(message: String) {
@@ -844,6 +962,8 @@ class MainActivity : Activity(), MessageClient.OnMessageReceivedListener {
         private const val PERMISSION_READ_OXYGEN_SATURATION =
             "android.permission.health.READ_OXYGEN_SATURATION"
         private const val SPO2_TICK_MS = 1_000L
+        private const val HEALTH_SEND_INTERVAL_MS = 3_000L
+        private const val DEFAULT_BODY_TEMP = 36.7
         private const val MAX_FAKE_SPO2 = 100
         private const val MIN_FAKE_SPO2 = 90
 

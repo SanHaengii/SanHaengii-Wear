@@ -5,9 +5,11 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -88,6 +90,49 @@ fun MainDashboard(bpm: Int, eta: String, distance: String) {
     }
 }
 
+@Composable
+fun BackendTestEntryScreen(onOpenBackendTest: () -> Unit) {
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color.Black)
+            .padding(16.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center
+    ) {
+        Icon(
+            imageVector = Icons.AutoMirrored.Filled.Send,
+            contentDescription = "Backend Test",
+            tint = Color(0xFF4ADE80),
+            modifier = Modifier.size(42.dp)
+        )
+
+        Spacer(modifier = Modifier.height(10.dp))
+
+        Text(
+            text = "백엔드 전송",
+            color = Color.White,
+            fontSize = 18.sp,
+            fontWeight = FontWeight.Bold
+        )
+
+        Spacer(modifier = Modifier.height(12.dp))
+
+        Button(
+            onClick = onOpenBackendTest,
+            colors = ButtonDefaults.buttonColors(backgroundColor = Color(0xFF4ADE80)),
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Text(
+                text = "테스트 열기",
+                color = Color.Black,
+                fontSize = 15.sp,
+                fontWeight = FontWeight.Bold
+            )
+        }
+    }
+}
+
 // 2. 특이사항 발생 시 띄워줄 알림 화면 (나중에 네비게이션으로 연결)
 @Composable
 fun AlertScreen(message: String, isWarning: Boolean) {
@@ -119,9 +164,9 @@ fun AlertScreen(message: String, isWarning: Boolean) {
 // 3. SOS 구조 조작 화면 (위아래 반반 분할 및 크기 조정)
 @Composable
 fun SosScreen(
-    isPaused: Boolean,
+    isHikingActive: Boolean,
     isSosReporting: Boolean,
-    onPauseToggle: () -> Unit,
+    onHikingToggle: () -> Unit,
     onSosClick: () -> Unit
 ) {
     val infiniteTransition = rememberInfiniteTransition(label = "sosBlink")
@@ -168,11 +213,11 @@ fun SosScreen(
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.Center
         ) {
-            // 상단: 일시정지 / 재개 버튼 (색상 다르게 설정)
+            // 상단: 산행 시작 / 정지 버튼
             Button(
-                onClick = onPauseToggle,
+                onClick = onHikingToggle,
                 colors = ButtonDefaults.buttonColors(
-                    backgroundColor = if (isPaused) Color(0xFF2196F3) else Color.DarkGray
+                    backgroundColor = if (isHikingActive) Color.DarkGray else Color(0xFF2196F3)
                 ),
                 modifier = Modifier
                     .weight(1f)
@@ -184,14 +229,14 @@ fun SosScreen(
                     horizontalArrangement = Arrangement.Center
                 ) {
                     Icon(
-                        imageVector = if (isPaused) Icons.Default.PlayArrow else Icons.Default.Pause,
-                        contentDescription = if (isPaused) "Resume" else "Pause",
+                        imageVector = if (isHikingActive) Icons.Default.Stop else Icons.Default.PlayArrow,
+                        contentDescription = if (isHikingActive) "Stop hiking" else "Start hiking",
                         tint = Color.White,
                         modifier = Modifier.size(24.dp)
                     )
                     Spacer(modifier = Modifier.width(8.dp))
                     Text(
-                        text = if (isPaused) "재개" else "중지",
+                        text = if (isHikingActive) "정지" else "시작",
                         color = Color.White,
                         fontSize = 16.sp,
                         fontWeight = FontWeight.Bold

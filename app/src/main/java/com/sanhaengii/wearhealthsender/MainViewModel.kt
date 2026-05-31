@@ -11,6 +11,7 @@ class MainViewModel : ViewModel() {
     var eta by mutableStateOf("-")
     var distance by mutableStateOf("-")
     var isPaused by mutableStateOf(false)
+    var isHikingActive by mutableStateOf(false)
     var isSosReporting by mutableStateOf(false)
 
     fun resetSosReporting() {
@@ -31,5 +32,9 @@ class MainViewModel : ViewModel() {
 
     fun togglePause() {
         isPaused = !isPaused
+    }
+
+    fun updateHikingActive(active: Boolean) {
+        isHikingActive = active
     }
 }

@@ -6,7 +6,7 @@ SanHaengii의 실제 센서 연동 전 검증을 위한 Wear OS 테스트 앱입
 
 - Native Android / Wear OS 프로젝트
 - Kotlin
-- Compose 미사용, 기본 Android View UI
+- Wear Compose 대시보드와 기존 Android View 기반 백엔드 테스트 화면
 - Wear OS Health Services SDK 사용
 - Galaxy Watch에서는 Samsung Health Sensor SDK를 통해 실제 SpO2 측정 시도
 - 외부 HTTP 라이브러리 미사용, `HttpURLConnection`으로 POST 전송
@@ -17,7 +17,8 @@ SanHaengii의 실제 센서 연동 전 검증을 위한 Wear OS 테스트 앱입
 
 ```json
 {
-  "measured_at": "2026-05-23T21:00:00+09:00",
+  "user_id": 1,
+  "measured_at": "2026-05-31T14:30:00+09:00",
   "heart_rate": 120,
   "steps": 800,
   "calories": 12.4,
@@ -28,7 +29,9 @@ SanHaengii의 실제 센서 연동 전 검증을 위한 Wear OS 테스트 앱입
 }
 ```
 
-Health Services 에뮬레이터 synthetic data는 심박수와 걸음 관련 값 중심으로 테스트할 수 있습니다. SpO2는 Galaxy Watch 실기기에서 Samsung Health Sensor SDK의 `SPO2_ON_DEMAND` 측정을 먼저 시도합니다. Samsung SDK가 앱에 포함되어 있지 않거나, 에뮬레이터/미지원 기기/측정 실패 상황이면 fake fallback으로 전환됩니다. fake SpO2는 100에서 시작해 1초마다 1씩 감소하고, 90 다음에는 다시 100으로 돌아가 반복됩니다. 체온과 혈압은 일반 Wear OS Health Services 운동 데이터에서 안정적으로 제공되는 값이 아니라 현재 앱에서는 `null`로 보냅니다.
+Health Services 에뮬레이터 synthetic data는 심박수와 걸음 관련 값 중심으로 테스트할 수 있습니다. SpO2는 Galaxy Watch 실기기에서 Samsung Health Sensor SDK의 `SPO2_ON_DEMAND` 측정을 먼저 시도합니다. Samsung SDK가 앱에 포함되어 있지 않거나, 에뮬레이터/미지원 기기/측정 실패 상황이면 fake fallback으로 전환됩니다. fake SpO2는 100에서 시작해 1초마다 1씩 감소하고, 90 다음에는 다시 100으로 돌아가 반복됩니다. 체온은 Samsung Health Sensor SDK의 skin temperature tracker를 먼저 시도합니다. Galaxy Watch의 온도 센서 값은 core body temperature가 아니라 피부/접촉 온도에 가까우며, 값을 받지 못하면 `36.7` fallback 값을 전송합니다. 혈압은 현재 앱에서는 `null`로 보냅니다.
+
+휴대폰 앱이 산행 시작 시 백엔드에 `hiking_records.status = 'active'` row를 먼저 만들고, 워치 앱은 `hiking_record_id` 없이 `user_id`만 전송합니다. 백엔드는 전달받은 `user_id`의 현재 active 산행을 찾아 `health_data_temp.hiking_record_id`에 자동 연결하는 구조를 전제로 합니다.
 
 ## Android Studio에서 실행
 
@@ -57,21 +60,24 @@ Health Services 에뮬레이터 synthetic data는 심박수와 걸음 관련 값
 
 - Backend URL: 전송할 백엔드 base URL
 - JWT token: `Authorization: Bearer <token>`으로 보낼 JWT
+- User ID: 백엔드가 active 산행을 찾을 사용자 id
 - Health Services에서 받은 데이터 미리보기
 - HTTP status code와 response body
 
 버튼:
 
-- Start HS exercise: Health Services walking exercise 시작
-- Stop HS exercise: exercise 종료
+- Start hiking: Health Services walking exercise 시작, 산행 상태 active 처리, 3초마다 백엔드 전송 시작
+- Stop hiking: exercise 종료, 3초 전송 중지
 - Measure SpO2: Galaxy Watch에서는 Samsung Health Sensor SDK로 실제 SpO2 1회 측정, fallback 상태에서는 fake SpO2를 한 단계 갱신
-- Send to backend: 현재 화면의 데이터를 백엔드로 전송
+- Send once: 산행 active 상태에서 현재까지 모인 데이터를 1회 전송
 - Start & send next: exercise를 시작하고 다음 Health Services update가 들어오면 바로 전송
-- Auto-send updates: ON/OFF 버튼. ON이면 Health Services update, Samsung SpO2 측정 완료, 또는 1초마다 갱신되는 fake SpO2 update를 받을 때마다 백엔드로 자동 전송
+- 3s backend send: ON/OFF 버튼. 산행 active 상태에서 3초마다 최신 통합 payload를 전송
+
+Compose 대시보드의 두 번째 화면에서도 `시작` 버튼을 누르면 같은 `user_id`와 백엔드 설정으로 산행 전송이 시작됩니다. 시작 후에는 버튼이 `정지` 상태로 바뀌고, 누르면 Health Services exercise와 3초 백엔드 전송을 중지합니다.
 
 처음 시작할 때 `ACTIVITY_RECOGNITION`, `BODY_SENSORS`, `READ_HEART_RATE` 또는 `READ_OXYGEN_SATURATION` 권한 요청이 뜰 수 있습니다. 허용해야 Health Services와 Samsung SpO2 데이터를 받을 수 있습니다.
 
-`measured_at`은 한국 시간대인 KST(`Asia/Seoul`, `+09:00`) 오프셋이 포함된 ISO 문자열로 전송됩니다.
+백엔드 전송 시 `measured_at`은 KST(`Asia/Seoul`, `+09:00`) 오프셋이 포함된 ISO 문자열로 전송됩니다. `steps`와 `calories`는 Health Services walking exercise 시작 이후의 누적값으로 보냅니다.
 
 ## Galaxy Watch 실제 SpO2 설정
 
@@ -142,9 +148,10 @@ adb shell am broadcast -a "whs.USE_SENSOR_PROVIDERS" com.google.android.wearable
 ```properties
 HEALTH_API_BASE_URL=https://web-production-94f63.up.railway.app
 HEALTH_API_TOKEN=your.jwt.token.here
+HEALTH_API_USER_ID=1
 ```
 
-Gradle sync 또는 rebuild 후 앱을 실행하면 `BuildConfig.HEALTH_API_TOKEN` 값이 화면 입력란의 기본값으로 들어갑니다.
+Gradle sync 또는 rebuild 후 앱을 실행하면 `BuildConfig.HEALTH_API_TOKEN`, `BuildConfig.HEALTH_API_USER_ID` 값이 화면 입력란의 기본값으로 들어갑니다.
 
 `local.properties`는 `.gitignore`에 포함되어 있으므로 실제 토큰을 커밋하지 않아도 됩니다.
 

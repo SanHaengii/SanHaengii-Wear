@@ -21,6 +21,7 @@ val healthApiBaseUrl = localProperties.getProperty(
     "https://web-production-94f63.up.railway.app"
 )
 val healthApiToken = localProperties.getProperty("HEALTH_API_TOKEN", "")
+val healthApiUserId = localProperties.getProperty("HEALTH_API_USER_ID", "1")
 
 android {
     namespace = "com.sanhaengii.wearhealthsender"
@@ -35,6 +36,7 @@ android {
 
         buildConfigField("String", "HEALTH_API_BASE_URL", healthApiBaseUrl.asBuildConfigString())
         buildConfigField("String", "HEALTH_API_TOKEN", healthApiToken.asBuildConfigString())
+        buildConfigField("String", "HEALTH_API_USER_ID", healthApiUserId.asBuildConfigString())
     }
 
     buildFeatures {
@@ -51,9 +53,6 @@ android {
 
     kotlinOptions {
         jvmTarget = "17"
-        freeCompilerArgs = freeCompilerArgs + listOf(
-            "-Xopt-in=androidx.compose.material3.ExperimentalMaterial3Api"
-        )
     }
 }
 

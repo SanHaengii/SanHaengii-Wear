@@ -3,3 +3,4 @@
 
 HEALTH_API_BASE_URL=https://web-production-94f63.up.railway.app
 HEALTH_API_TOKEN=
+HEALTH_API_USER_ID=1
