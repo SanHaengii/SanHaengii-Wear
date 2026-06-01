@@ -21,7 +21,9 @@ val healthApiBaseUrl = localProperties.getProperty(
     "https://web-production-94f63.up.railway.app"
 )
 val healthApiToken = localProperties.getProperty("HEALTH_API_TOKEN", "")
-val healthApiUserId = localProperties.getProperty("HEALTH_API_USER_ID", "1")
+val healthApiUserId = localProperties.getProperty("HEALTH_API_USER_ID", "")
+// 로컬 Flask 서버 (에뮬레이터: 10.0.2.2, 실기기: 호스트 PC IP)
+val trailApiBaseUrl = localProperties.getProperty("TRAIL_API_BASE_URL", "http://10.0.2.2:5001")
 
 android {
     namespace = "com.sanhaengii.wearhealthsender"
@@ -37,6 +39,7 @@ android {
         buildConfigField("String", "HEALTH_API_BASE_URL", healthApiBaseUrl.asBuildConfigString())
         buildConfigField("String", "HEALTH_API_TOKEN", healthApiToken.asBuildConfigString())
         buildConfigField("String", "HEALTH_API_USER_ID", healthApiUserId.asBuildConfigString())
+        buildConfigField("String", "TRAIL_API_BASE_URL", trailApiBaseUrl.asBuildConfigString())
     }
 
     buildFeatures {
@@ -53,6 +56,10 @@ android {
 
     kotlinOptions {
         jvmTarget = "17"
+    }
+
+    testOptions {
+        unitTests.isReturnDefaultValues = true
     }
 }
 
@@ -80,4 +87,9 @@ dependencies {
 
     // 구글 플레이 서비스 (웨어러블 통신용)
     implementation("com.google.android.gms:play-services-wearable:18.1.0")
+
+    // 단위 테스트
+    testImplementation("junit:junit:4.13.2")
+    // org.json.JSONObject는 Android 스텁에서 RuntimeException을 던지므로 실제 구현체 사용
+    testImplementation("org.json:json:20231013")
 }
