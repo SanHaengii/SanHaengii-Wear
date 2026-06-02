@@ -612,6 +612,10 @@ class ComposeMainActivity : ComponentActivity(), DataClient.OnDataChangedListene
                     }
                     .maxByOrNull { it.optString("started_at", "") }
 
+                // ETA/거리는 센서 시작 여부와 무관하게 항상 갱신 (모바일이 PUT한 값 반영)
+                val etaMin = ongoing?.optDouble("duration_minutes", Double.NaN) ?: Double.NaN
+                val remainKm = ongoing?.optDouble("distance_km", Double.NaN) ?: Double.NaN
+
                 mainHandler.post {
                     if (ongoing != null) {
                         val recordId = ongoing.optLong("id").takeIf { it > 0 }
@@ -619,6 +623,17 @@ class ComposeMainActivity : ComponentActivity(), DataClient.OnDataChangedListene
                             activeHikingRecordId = recordId
                             syncedHikingRecordId = recordId
                         }
+                        // 모바일이 보낸 잔여 ETA/거리를 대시보드에 반영 (권한/센서 없이도 표시)
+                        if (!etaMin.isNaN() && etaMin >= 0) {
+                            totalHikingMinutes = etaMin.toInt()
+                            hikingStartedAtMs = System.currentTimeMillis()
+                            mainViewModel.updateEta("${etaMin.toLong()}분")
+                        }
+                        if (!remainKm.isNaN() && remainKm >= 0) {
+                            totalHikingDistanceKm = remainKm
+                            mainViewModel.updateDistance(String.format("%.2f", remainKm) + "km")
+                        }
+                        println("[Relay] ETA/거리 동기화: eta=${etaMin}분, dist=${remainKm}km (record=$recordId)")
                         when (ongoing.optString("status")) {
                             "active" -> {
                                 if (!mainViewModel.isHikingActive) {
@@ -1184,6 +1199,7 @@ class ComposeMainActivity : ComponentActivity(), DataClient.OnDataChangedListene
                 val etaMin = active.optDouble("duration_minutes", Double.NaN)
                 val remainKm = active.optDouble("distance_km", Double.NaN)
 
+                println("[Relay] ETA/거리 수신: eta=${etaMin}분, dist=${remainKm}km (record=${activeHikingRecordId})")
                 mainHandler.post {
                     if (!etaMin.isNaN() && etaMin >= 0) {
                         // 모바일 알고리즘의 '남은 시간'을 새 카운트다운 기준점으로 재설정
