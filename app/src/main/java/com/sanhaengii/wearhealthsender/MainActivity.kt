@@ -6,6 +6,10 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Color
 import android.graphics.Typeface
+import android.hardware.Sensor
+import android.hardware.SensorEvent
+import android.hardware.SensorEventListener
+import android.hardware.SensorManager
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
@@ -91,8 +95,8 @@ data class HealthServicesPayload(
         return copy(
             measuredAt = update.measuredAt,
             heartRate = update.heartRate ?: heartRate,
-            steps = update.steps ?: steps,
-            calories = update.calories ?: calories,
+            steps = maxNullable(steps, update.steps),
+            calories = maxNullable(calories, update.calories),
             spo2 = update.spo2 ?: spo2,
             bodyTemp = update.bodyTemp ?: bodyTemp,
             bloodPressureSystolic = update.bloodPressureSystolic ?: bloodPressureSystolic,
@@ -101,15 +105,13 @@ data class HealthServicesPayload(
     }
 
     fun hasCollectedRequiredValues(): Boolean {
-        return heartRate != null && steps != null && calories != null && spo2 != null
+        return steps != null && calories != null
     }
 
     fun missingRequiredFields(): String {
         return listOfNotNull(
-            "heart_rate".takeIf { heartRate == null },
             "steps".takeIf { steps == null },
             "calories".takeIf { calories == null },
-            "spo2".takeIf { spo2 == null },
         ).joinToString()
     }
 
@@ -135,6 +137,14 @@ data class HealthServicesPayload(
             )
         }
     }
+}
+
+private fun maxNullable(first: Int?, second: Int?): Int? {
+    return listOfNotNull(first, second).maxOrNull()
+}
+
+private fun maxNullable(first: Double?, second: Double?): Double? {
+    return listOfNotNull(first, second).maxOrNull()
 }
 
 class MainActivity : Activity(), MessageClient.OnMessageReceivedListener {
@@ -169,11 +179,37 @@ class MainActivity : Activity(), MessageClient.OnMessageReceivedListener {
     private var pendingPermissionAction = PendingPermissionAction.NONE
     private var nextFakeSpo2 = 100
     private var lastSpo2: Double? = null
+    private var lastHeartRate: Int? = null
     private var isFakeSpo2Active = false
     private var spo2SourceText = "initializing"
     private var samsungSpo2Provider: SamsungSpo2Provider? = null
-    private var samsungSkinTemperatureProvider: SamsungSkinTemperatureProvider? = null
     private var supportedDataTypes = DEFAULT_DATA_TYPES
+    private var stepCounterBaseline: Float? = null
+    private var fallbackSteps = 0
+    private val sensorManager by lazy { getSystemService(SensorManager::class.java) }
+    private val stepCounterSensor by lazy { sensorManager?.getDefaultSensor(Sensor.TYPE_STEP_COUNTER) }
+    private val stepCounterListener = object : SensorEventListener {
+        override fun onSensorChanged(event: SensorEvent) {
+            val totalSteps = event.values.firstOrNull() ?: return
+            val baseline = stepCounterBaseline
+            if (baseline == null) {
+                stepCounterBaseline = totalSteps
+                fallbackSteps = 0
+            } else {
+                fallbackSteps = (totalSteps - baseline).toInt().coerceAtLeast(0)
+            }
+
+            val stableSteps = maxOf(currentPayload.steps ?: 0, fallbackSteps)
+            currentPayload = currentPayload.copy(
+                measuredAt = nowKstIsoString(),
+                steps = stableSteps,
+                calories = stableCalories(null, stableSteps),
+            )
+            renderPayload()
+        }
+
+        override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) = Unit
+    }
 
     private val fakeSpo2Runnable = object : Runnable {
         override fun run() {
@@ -245,7 +281,6 @@ class MainActivity : Activity(), MessageClient.OnMessageReceivedListener {
         updateExerciseButtons()
         refreshCapabilities()
         startSpo2Provider()
-        startSkinTemperatureProvider()
         
         Wearable.getMessageClient(this).addListener(this)
     }
@@ -254,7 +289,7 @@ class MainActivity : Activity(), MessageClient.OnMessageReceivedListener {
         mainHandler.removeCallbacks(fakeSpo2Runnable)
         mainHandler.removeCallbacks(periodicHealthSendRunnable)
         samsungSpo2Provider?.stop()
-        samsungSkinTemperatureProvider?.stop()
+        stopStepCounterFallback()
         if (isExerciseRunning) {
             exerciseClient.clearUpdateCallbackAsync(exerciseUpdateCallback)
             exerciseClient.endExerciseAsync()
@@ -501,7 +536,13 @@ class MainActivity : Activity(), MessageClient.OnMessageReceivedListener {
                 .onSuccess {
                     isExerciseRunning = true
                     isHikingActive = true
-                    currentPayload = HealthServicesPayload.empty().copy(spo2 = lastSpo2)
+                    currentPayload = HealthServicesPayload.empty().copy(
+                        heartRate = lastHeartRate,
+                        spo2 = lastSpo2,
+                        steps = 0,
+                        bodyTemp = DEFAULT_BODY_TEMP,
+                    )
+                    startStepCounterFallback()
                     startPeriodicSending()
                     updateExerciseButtons()
                     renderPayload()
@@ -531,6 +572,7 @@ class MainActivity : Activity(), MessageClient.OnMessageReceivedListener {
                     isExerciseRunning = false
                     isHikingActive = false
                     sendOnNextUpdate = false
+                    stopStepCounterFallback()
                     stopPeriodicSending()
                     updateExerciseButtons()
                     appendResult("Stopped hiking and 3-second health data sending.")
@@ -539,30 +581,67 @@ class MainActivity : Activity(), MessageClient.OnMessageReceivedListener {
         }
     }
 
+    private fun startStepCounterFallback() {
+        fallbackSteps = 0
+        stepCounterBaseline = null
+        currentPayload = currentPayload.copy(steps = currentPayload.steps ?: 0)
+        val sensor = stepCounterSensor
+        if (sensor == null) {
+            appendResult("Step counter sensor is unavailable; using Health Services steps only.")
+            return
+        }
+
+        sensorManager?.registerListener(stepCounterListener, sensor, SensorManager.SENSOR_DELAY_NORMAL)
+        appendResult("Step counter fallback started.")
+    }
+
+    private fun stopStepCounterFallback() {
+        sensorManager?.unregisterListener(stepCounterListener)
+        stepCounterBaseline = null
+        fallbackSteps = 0
+    }
+
     private fun payloadFromMetrics(metrics: DataPointContainer): HealthServicesPayload {
         val heartRate = metrics.getData(DataType.HEART_RATE_BPM)
             .lastOrNull()
             ?.value
             ?.roundToInt()
+        if (heartRate != null) {
+            lastHeartRate = heartRate
+        }
 
-        val steps = metrics.getData(DataType.STEPS_TOTAL)
+        val healthServicesSteps = metrics.getData(DataType.STEPS_TOTAL)
             ?.total
             ?.toInt()
+        val steps = maxOf(currentPayload.steps ?: 0, fallbackSteps, healthServicesSteps ?: 0)
 
-        val calories = metrics.getData(DataType.CALORIES_TOTAL)
+        val healthServicesCalories = metrics.getData(DataType.CALORIES_TOTAL)
             ?.total
             ?.roundToOneDecimal()
+        val calories = stableCalories(healthServicesCalories, steps)
 
         return HealthServicesPayload(
             measuredAt = nowKstIsoString(),
-            heartRate = heartRate,
+            heartRate = heartRate ?: currentPayload.heartRate ?: lastHeartRate,
             steps = steps,
             calories = calories,
             spo2 = lastSpo2,
-            bodyTemp = null,
+            bodyTemp = currentPayload.bodyTemp ?: DEFAULT_BODY_TEMP,
             bloodPressureSystolic = null,
             bloodPressureDiastolic = null,
         )
+    }
+
+    private fun stableCalories(healthServicesCalories: Double?, steps: Int): Double? {
+        return listOfNotNull(
+            currentPayload.calories,
+            healthServicesCalories,
+            estimateCaloriesFromSteps(steps).takeIf { steps > 0 },
+        ).maxOrNull()?.roundToOneDecimal()
+    }
+
+    private fun estimateCaloriesFromSteps(steps: Int): Double {
+        return (steps * CALORIES_PER_STEP).roundToOneDecimal()
     }
 
     private fun startSpo2Provider() {
@@ -572,7 +651,7 @@ class MainActivity : Activity(), MessageClient.OnMessageReceivedListener {
             mainHandler = mainHandler,
             onReading = ::handleSamsungSpo2Reading,
             onStatus = ::appendResult,
-            onFallbackNeeded = ::activateFakeSpo2Fallback,
+            onFallbackNeeded = ::handleSamsungSpo2Unavailable,
         )
         samsungSpo2Provider = provider
         if (provider.start()) {
@@ -580,6 +659,11 @@ class MainActivity : Activity(), MessageClient.OnMessageReceivedListener {
             spo2SourceText = "Samsung Health Sensor SDK"
             updateSpo2Button()
             renderPayload()
+        } else {
+            samsungSpo2Provider = null
+            spo2SourceText = "unavailable"
+            updateSpo2Button()
+            appendResult("Samsung SpO2 provider could not start. Continuing without SpO2.")
         }
     }
 
@@ -598,22 +682,38 @@ class MainActivity : Activity(), MessageClient.OnMessageReceivedListener {
 
         val provider = samsungSpo2Provider
         if (provider == null) {
-            activateFakeSpo2Fallback("Samsung SpO2 provider is not available.")
+            appendResult("Samsung SpO2 provider is not available. Continuing without SpO2.")
         } else {
             provider.requestMeasurement()
         }
     }
 
     private fun handleSamsungSpo2Reading(spo2: Double, heartRate: Int?) {
+        val stableHeartRate = heartRate ?: currentPayload.heartRate ?: lastHeartRate
+        if (heartRate != null) {
+            lastHeartRate = heartRate
+        }
         lastSpo2 = spo2
         spo2SourceText = "Samsung Health Sensor SDK"
         currentPayload = currentPayload.copy(
             measuredAt = nowKstIsoString(),
-            heartRate = heartRate ?: currentPayload.heartRate,
+            heartRate = stableHeartRate,
             spo2 = spo2,
         )
         renderPayload()
         appendResult("Samsung SpO2 measured: ${spo2.roundToInt()}%.")
+    }
+
+    private fun handleSamsungSpo2Unavailable(reason: String) {
+        val previousSpo2 = lastSpo2
+        if (previousSpo2 == null) {
+            appendResult("$reason No previous SpO2 yet; sending without SpO2 until a measurement succeeds.")
+            return
+        }
+
+        currentPayload = currentPayload.copy(spo2 = previousSpo2)
+        renderPayload()
+        appendResult("$reason Keeping previous SpO2=${previousSpo2.roundToInt()}%.")
     }
 
     private fun activateFakeSpo2Fallback(reason: String) {
@@ -659,6 +759,9 @@ class MainActivity : Activity(), MessageClient.OnMessageReceivedListener {
             return false
         }
 
+        currentPayload = stablePayloadForSend()
+        renderPayload()
+
         if (!currentPayload.hasCollectedRequiredValues()) {
             appendResult("Waiting for collected payload. Missing: ${currentPayload.missingRequiredFields()}")
             return false
@@ -685,10 +788,7 @@ class MainActivity : Activity(), MessageClient.OnMessageReceivedListener {
 
         setSending(true)
 
-        val payloadForSend = currentPayload.copy(
-            measuredAt = nowKstIsoString(),
-            bodyTemp = currentPayload.bodyTemp ?: DEFAULT_BODY_TEMP,
-        )
+        val payloadForSend = stablePayloadForSend()
         currentPayload = payloadForSend
         renderPayload()
 
@@ -707,6 +807,17 @@ class MainActivity : Activity(), MessageClient.OnMessageReceivedListener {
                     .onFailure { appendResult("ERROR: ${it.message ?: it.javaClass.simpleName}") }
             }
         }.start()
+    }
+
+    private fun stablePayloadForSend(): HealthServicesPayload {
+        val stableSteps = maxOf(currentPayload.steps ?: 0, fallbackSteps)
+        return currentPayload.copy(
+            measuredAt = nowKstIsoString(),
+            heartRate = currentPayload.heartRate ?: lastHeartRate,
+            steps = stableSteps,
+            calories = stableCalories(null, stableSteps),
+            bodyTemp = currentPayload.bodyTemp ?: DEFAULT_BODY_TEMP,
+        )
     }
 
     private fun postHealthData(baseUrl: String, token: String, body: String): String {
@@ -789,30 +900,6 @@ class MainActivity : Activity(), MessageClient.OnMessageReceivedListener {
             stopPeriodicSending()
         } else {
             startPeriodicSending()
-        }
-    }
-
-    private fun startSkinTemperatureProvider() {
-        appendResult("Body temp provider: trying Samsung skin temperature tracker.")
-        val provider = SamsungSkinTemperatureProvider(
-            context = this,
-            mainHandler = mainHandler,
-            onReading = { temperature ->
-                currentPayload = currentPayload.copy(
-                    measuredAt = nowKstIsoString(),
-                    bodyTemp = temperature,
-                )
-                renderPayload()
-                appendResult("Samsung skin temperature measured: $temperature C.")
-            },
-            onStatus = ::appendResult,
-            onUnavailable = { message ->
-                appendResult("$message Using body_temp fallback when sending.")
-            },
-        )
-        samsungSkinTemperatureProvider = provider
-        if (!provider.start()) {
-            samsungSkinTemperatureProvider = null
         }
     }
 
@@ -964,6 +1051,7 @@ class MainActivity : Activity(), MessageClient.OnMessageReceivedListener {
         private const val SPO2_TICK_MS = 1_000L
         private const val HEALTH_SEND_INTERVAL_MS = 3_000L
         private const val DEFAULT_BODY_TEMP = 36.7
+        private const val CALORIES_PER_STEP = 0.04
         private const val MAX_FAKE_SPO2 = 100
         private const val MIN_FAKE_SPO2 = 90
 
