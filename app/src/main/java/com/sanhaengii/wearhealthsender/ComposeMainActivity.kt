@@ -14,6 +14,11 @@ import android.os.Looper
 import android.os.VibrationEffect
 import android.os.Vibrator
 import android.os.VibratorManager
+import android.hardware.Sensor
+import android.hardware.SensorEvent
+import android.hardware.SensorEventListener
+import android.hardware.SensorManager
+import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.ExperimentalFoundationApi
@@ -121,11 +126,38 @@ class ComposeMainActivity : ComponentActivity(), DataClient.OnDataChangedListene
     }
     private var nextFakeSpo2 = 100
     private var lastSpo2: Double? = null
+    private var lastHeartRate: Int? = null
     private var isFakeSpo2Active = false
     private var lastSamsungSpo2RequestAt = 0L
+    private var nextSamsungSpo2RequestAt = 0L
     private var samsungSpo2Provider: SamsungSpo2Provider? = null
-    private var samsungSkinTemperatureProvider: SamsungSkinTemperatureProvider? = null
+    private var stepCounterBaseline: Float? = null
+    private var fallbackSteps = 0
+    private var lastLoggedStepValue = -1
+    private val sensorManager by lazy { getSystemService(SensorManager::class.java) }
+    private val stepCounterSensor by lazy { sensorManager?.getDefaultSensor(Sensor.TYPE_STEP_COUNTER) }
+    private val stepCounterListener = object : SensorEventListener {
+        override fun onSensorChanged(event: SensorEvent) {
+            val totalSteps = event.values.firstOrNull() ?: return
+            val baseline = stepCounterBaseline
+            if (baseline == null) {
+                stepCounterBaseline = totalSteps
+                fallbackSteps = 0
+            } else {
+                fallbackSteps = (totalSteps - baseline).toInt().coerceAtLeast(0)
+            }
 
+            val stableSteps = maxOf(currentPayload.steps ?: 0, fallbackSteps)
+            currentPayload = currentPayload.copy(
+                measuredAt = freshMeasuredAt(),
+                steps = stableSteps,
+                calories = stableCalories(null, stableSteps),
+            )
+            logStepUpdate("Step counter fallback", fallbackSteps)
+        }
+
+        override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) = Unit
+    }
     private val fakeSpo2Runnable = object : Runnable {
         override fun run() {
             updateFakeSpo2()
@@ -162,7 +194,11 @@ class ComposeMainActivity : ComponentActivity(), DataClient.OnDataChangedListene
         override fun onExerciseUpdateReceived(update: ExerciseUpdate) {
             val payload = payloadFromMetrics(update.latestMetrics)
             currentPayload = currentPayload.mergeWith(payload)
-            currentPayload.heartRate?.let { mainViewModel.updateHeartRate(it) }
+            currentPayload.heartRate?.let {
+                lastHeartRate = it
+                saveLastHeartRate(it)
+                mainViewModel.updateHeartRate(it)
+            }
         }
 
         override fun onAvailabilityChanged(dataType: DataType<*, *>, availability: Availability) = Unit
@@ -241,6 +277,8 @@ class ComposeMainActivity : ComponentActivity(), DataClient.OnDataChangedListene
 
         // 저장된 토큰 복원 후, 모바일 로그인 토큰 상시 동기화 시작
         loadSavedToken()
+        loadSavedHeartRate()
+        loadSavedSpo2()
         mainHandler.post(credentialSyncRunnable)
         // 모바일 산행 상태 상시 동기화 시작 (모바일 시작/정지/중단 → 워치 반영)
         mainHandler.post(mobileHikingSyncRunnable)
@@ -684,10 +722,15 @@ class ComposeMainActivity : ComponentActivity(), DataClient.OnDataChangedListene
             return
         }
 
+        loadSavedSpo2()
+        loadSavedHeartRate()
         currentPayload = HealthServicesPayload.empty().copy(
+            heartRate = lastHeartRate,
             spo2 = lastSpo2,
-            bodyTemp = currentPayload.bodyTemp,
+            steps = 0,
+            bodyTemp = currentPayload.bodyTemp ?: DEFAULT_BODY_TEMP,
         )
+        startStepCounterFallback()
         startSensorProviders()
 
         scope.launch {
@@ -737,9 +780,10 @@ class ComposeMainActivity : ComponentActivity(), DataClient.OnDataChangedListene
         mainViewModel.updateDistance("-")
         samsungSpo2Provider?.stop()
         samsungSpo2Provider = null
-        samsungSkinTemperatureProvider?.stop()
-        samsungSkinTemperatureProvider = null
         isFakeSpo2Active = false
+        lastSamsungSpo2RequestAt = 0L
+        nextSamsungSpo2RequestAt = 0L
+        stopStepCounterFallback()
 
         scope.launch {
             runCatching {
@@ -754,7 +798,8 @@ class ComposeMainActivity : ComponentActivity(), DataClient.OnDataChangedListene
 
     private fun startSensorProviders() {
         startSpo2Provider()
-        startSkinTemperatureProvider()
+        currentPayload = currentPayload.copy(bodyTemp = currentPayload.bodyTemp ?: DEFAULT_BODY_TEMP)
+        logSensorStatus("Using default body_temp=$DEFAULT_BODY_TEMP C.")
     }
 
     private fun startSpo2Provider() {
@@ -766,44 +811,44 @@ class ComposeMainActivity : ComponentActivity(), DataClient.OnDataChangedListene
             context = this,
             mainHandler = mainHandler,
             onReading = { spo2, heartRate ->
+                val stableHeartRate = heartRate ?: currentPayload.heartRate ?: lastHeartRate
+                if (heartRate != null) {
+                    lastHeartRate = heartRate
+                    saveLastHeartRate(heartRate)
+                }
                 lastSpo2 = spo2
                 currentPayload = currentPayload.copy(
                     measuredAt = freshMeasuredAt(),
-                    heartRate = heartRate ?: currentPayload.heartRate,
+                    heartRate = stableHeartRate,
                     spo2 = spo2,
                 )
                 currentPayload.heartRate?.let { mainViewModel.updateHeartRate(it) }
+                saveLastSpo2(spo2)
+                nextSamsungSpo2RequestAt = System.currentTimeMillis() + SPO2_REAL_REQUEST_INTERVAL_MS
+                logSensorStatus("Samsung SpO2 measured: ${spo2.roundToInt()}%.")
             },
-            onStatus = { },
-            onFallbackNeeded = { activateFakeSpo2Fallback() },
+            onStatus = ::logSensorStatus,
+            onFallbackNeeded = { message ->
+                keepPreviousSpo2AfterFailure(message)
+            },
         )
         samsungSpo2Provider = provider
         if (!provider.start()) {
-            activateFakeSpo2Fallback()
+            samsungSpo2Provider = null
+            logSensorStatus("Samsung SpO2 provider could not start. Continuing without SpO2.")
         }
     }
 
-    private fun startSkinTemperatureProvider() {
-        if (samsungSkinTemperatureProvider != null) {
+    private fun keepPreviousSpo2AfterFailure(message: String) {
+        val previousSpo2 = lastSpo2
+        nextSamsungSpo2RequestAt = System.currentTimeMillis() + SPO2_RETRY_AFTER_FAILURE_MS
+        if (previousSpo2 == null) {
+            logSensorStatus("$message No previous SpO2 yet; retrying later.")
             return
         }
 
-        val provider = SamsungSkinTemperatureProvider(
-            context = this,
-            mainHandler = mainHandler,
-            onReading = { temperature ->
-                currentPayload = currentPayload.copy(
-                    measuredAt = freshMeasuredAt(),
-                    bodyTemp = temperature,
-                )
-            },
-            onStatus = { },
-            onUnavailable = { },
-        )
-        samsungSkinTemperatureProvider = provider
-        if (!provider.start()) {
-            samsungSkinTemperatureProvider = null
-        }
+        currentPayload = currentPayload.copy(spo2 = previousSpo2)
+        logSensorStatus("$message Keeping previous SpO2=${previousSpo2.roundToInt()}% and retrying later.")
     }
 
     private fun requestSamsungSpo2IfDue(force: Boolean = false) {
@@ -811,14 +856,53 @@ class ComposeMainActivity : ComponentActivity(), DataClient.OnDataChangedListene
             return
         }
 
+        if (samsungSpo2Provider == null) {
+            startSpo2Provider()
+        }
+
         val now = System.currentTimeMillis()
-        if (!force && now - lastSamsungSpo2RequestAt < SPO2_REAL_REQUEST_INTERVAL_MS) {
+        if (!force && now < nextSamsungSpo2RequestAt) {
             return
         }
 
         val requested = samsungSpo2Provider?.requestMeasurement() == true
+        lastSamsungSpo2RequestAt = now
         if (requested) {
-            lastSamsungSpo2RequestAt = now
+            nextSamsungSpo2RequestAt = now + SPO2_REAL_REQUEST_INTERVAL_MS
+        } else {
+            nextSamsungSpo2RequestAt = now + SPO2_NOT_READY_RETRY_MS
+        }
+    }
+
+    private fun startStepCounterFallback() {
+        fallbackSteps = 0
+        stepCounterBaseline = null
+        lastLoggedStepValue = -1
+        currentPayload = currentPayload.copy(steps = currentPayload.steps ?: 0)
+        val sensor = stepCounterSensor
+        if (sensor == null) {
+            logSensorStatus("Step counter sensor is unavailable; using Health Services steps only.")
+            return
+        }
+
+        sensorManager?.registerListener(stepCounterListener, sensor, SensorManager.SENSOR_DELAY_NORMAL)
+        logSensorStatus("Step counter fallback started.")
+    }
+
+    private fun stopStepCounterFallback() {
+        sensorManager?.unregisterListener(stepCounterListener)
+        stepCounterBaseline = null
+        fallbackSteps = 0
+        lastLoggedStepValue = -1
+    }
+
+    private fun logStepUpdate(source: String, steps: Int) {
+        if (steps == lastLoggedStepValue) {
+            return
+        }
+        if (steps <= 5 || steps % 10 == 0 || steps - lastLoggedStepValue >= 10) {
+            lastLoggedStepValue = steps
+            logSensorStatus("$source: steps=$steps")
         }
     }
 
@@ -833,6 +917,10 @@ class ComposeMainActivity : ComponentActivity(), DataClient.OnDataChangedListene
         updateFakeSpo2()
         mainHandler.removeCallbacks(fakeSpo2Runnable)
         mainHandler.postDelayed(fakeSpo2Runnable, SPO2_TICK_MS)
+    }
+
+    private fun logSensorStatus(message: String) {
+        Log.d(SENSOR_LOG_TAG, message)
     }
 
     private fun updateFakeSpo2() {
@@ -850,27 +938,41 @@ class ComposeMainActivity : ComponentActivity(), DataClient.OnDataChangedListene
             .lastOrNull()
             ?.value
             ?.roundToInt()
-        val steps = metrics.getData(DataType.STEPS_TOTAL)
+        if (heartRate != null) {
+            lastHeartRate = heartRate
+            saveLastHeartRate(heartRate)
+        }
+        val healthServicesSteps = metrics.getData(DataType.STEPS_TOTAL)
             ?.total
             ?.toInt()
-        val calories = metrics.getData(DataType.CALORIES_TOTAL)
+        if (healthServicesSteps != null) {
+            logStepUpdate("Health Services steps", healthServicesSteps)
+        }
+        val steps = maxOf(currentPayload.steps ?: 0, fallbackSteps, healthServicesSteps ?: 0)
+        val healthServicesCalories = metrics.getData(DataType.CALORIES_TOTAL)
             ?.total
             ?.roundToOneDecimal()
+        val calories = stableCalories(healthServicesCalories, steps)
 
         return HealthServicesPayload(
             measuredAt = freshMeasuredAt(),
-            heartRate = heartRate,
+            heartRate = heartRate ?: currentPayload.heartRate ?: lastHeartRate,
             steps = steps,
             calories = calories,
             spo2 = lastSpo2,
-            bodyTemp = currentPayload.bodyTemp,
+            bodyTemp = currentPayload.bodyTemp ?: DEFAULT_BODY_TEMP,
             bloodPressureSystolic = null,
             bloodPressureDiastolic = null,
         )
     }
 
     private fun sendCollectedPayload() {
-        if (isSending || !currentPayload.hasCollectedRequiredValues()) {
+        if (isSending) {
+            return
+        }
+
+        val payloadForSend = stablePayloadForSend()
+        if (!payloadForSend.hasCollectedRequiredValues()) {
             return
         }
 
@@ -884,10 +986,6 @@ class ComposeMainActivity : ComponentActivity(), DataClient.OnDataChangedListene
             return
         }
 
-        val payloadForSend = currentPayload.copy(
-            measuredAt = freshMeasuredAt(),
-            bodyTemp = currentPayload.bodyTemp ?: DEFAULT_BODY_TEMP,
-        )
         currentPayload = payloadForSend
         val requestBody = payloadForSend.toRequestBody(userId)
         val token = currentToken()
@@ -907,6 +1005,29 @@ class ComposeMainActivity : ComponentActivity(), DataClient.OnDataChangedListene
                 }
             }
         }.start()
+    }
+
+    private fun stablePayloadForSend(): HealthServicesPayload {
+        val stableSteps = maxOf(currentPayload.steps ?: 0, fallbackSteps)
+        return currentPayload.copy(
+            measuredAt = freshMeasuredAt(),
+            heartRate = currentPayload.heartRate ?: lastHeartRate,
+            steps = stableSteps,
+            calories = stableCalories(null, stableSteps),
+            bodyTemp = currentPayload.bodyTemp ?: DEFAULT_BODY_TEMP,
+        )
+    }
+
+    private fun stableCalories(healthServicesCalories: Double?, steps: Int): Double? {
+        return listOfNotNull(
+            currentPayload.calories,
+            healthServicesCalories,
+            estimateCaloriesFromSteps(steps).takeIf { steps > 0 },
+        ).maxOrNull()?.roundToOneDecimal()
+    }
+
+    private fun estimateCaloriesFromSteps(steps: Int): Double {
+        return (steps * CALORIES_PER_STEP).roundToOneDecimal()
     }
 
     private fun postHealthDataWithResponse(baseUrl: String, token: String, body: String): String {
@@ -1127,6 +1248,47 @@ class ComposeMainActivity : ComponentActivity(), DataClient.OnDataChangedListene
         prefs.getString(PREF_KEY_USER_ID, null)?.takeIf { it.isNotBlank() }?.let { runtimeUserId = it }
     }
 
+    private fun loadSavedSpo2() {
+        val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        if (!prefs.contains(PREF_KEY_LAST_SPO2)) {
+            return
+        }
+
+        val savedSpo2 = prefs.getFloat(PREF_KEY_LAST_SPO2, Float.NaN)
+        if (!savedSpo2.isNaN()) {
+            lastSpo2 = savedSpo2.toDouble()
+            currentPayload = currentPayload.copy(spo2 = lastSpo2)
+            logSensorStatus("Restored previous SpO2=${savedSpo2.roundToInt()}%.")
+        }
+    }
+
+    private fun loadSavedHeartRate() {
+        val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val savedHeartRate = prefs.getInt(PREF_KEY_LAST_HEART_RATE, -1)
+        if (savedHeartRate > 0) {
+            lastHeartRate = savedHeartRate
+            currentPayload = currentPayload.copy(heartRate = currentPayload.heartRate ?: savedHeartRate)
+            if (::mainViewModel.isInitialized) {
+                mainViewModel.updateHeartRate(savedHeartRate)
+            }
+            logSensorStatus("Restored previous heart_rate=$savedHeartRate bpm.")
+        }
+    }
+
+    private fun saveLastSpo2(spo2: Double) {
+        getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putFloat(PREF_KEY_LAST_SPO2, spo2.toFloat())
+            .apply()
+    }
+
+    private fun saveLastHeartRate(heartRate: Int) {
+        getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putInt(PREF_KEY_LAST_HEART_RATE, heartRate)
+            .apply()
+    }
+
     // Flask relay에서 모바일이 push한 최신 user_id+JWT를 받아 런타임/영구 저장에 반영
     private fun fetchWatchCredentials() {
         val trailUrl = BuildConfig.TRAIL_API_BASE_URL.trim().trimEnd('/')
@@ -1343,15 +1505,21 @@ class ComposeMainActivity : ComponentActivity(), DataClient.OnDataChangedListene
         private const val PREFS_NAME = "sanhaengii_watch_prefs"
         private const val PREF_KEY_TOKEN = "health_api_token"
         private const val PREF_KEY_USER_ID = "health_api_user_id"
+        private const val PREF_KEY_LAST_SPO2 = "last_spo2"
+        private const val PREF_KEY_LAST_HEART_RATE = "last_heart_rate"
         private const val ANOMALY_COOLDOWN_MS = 60_000L
         // 백엔드 /api/emergency는 location 필수. GPS 실패 시 폴백 좌표(모바일 앱과 동일)
         private const val DEFAULT_EMERGENCY_LAT = 37.557999
         private const val DEFAULT_EMERGENCY_LNG = 127.007993
         private const val SPO2_TICK_MS = 1_000L
         private const val SPO2_REAL_REQUEST_INTERVAL_MS = 60_000L
+        private const val SPO2_NOT_READY_RETRY_MS = 15_000L
+        private const val SPO2_RETRY_AFTER_FAILURE_MS = 180_000L
         private const val DEFAULT_BODY_TEMP = 36.7
+        private const val CALORIES_PER_STEP = 0.04
         private const val MAX_FAKE_SPO2 = 100
         private const val MIN_FAKE_SPO2 = 90
+        private const val SENSOR_LOG_TAG = "WearHealthSender"
 
         private val DEFAULT_DATA_TYPES = setOf(
             DataType.HEART_RATE_BPM,

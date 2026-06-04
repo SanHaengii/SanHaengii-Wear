@@ -18,6 +18,8 @@ class SamsungSpo2Provider(
     private var trackerListener: Any? = null
     private var isConnected = false
     private var isMeasuring = false
+    private var connectionGeneration = 0
+    private var lastNotReadyStatusAt = 0L
 
     private val measurementTimeout = Runnable {
         if (!isMeasuring) {
@@ -28,6 +30,14 @@ class SamsungSpo2Provider(
         onFallbackNeeded("Samsung SpO2 measurement timed out.")
     }
 
+    private val connectionTimeout = Runnable {
+        if (isConnected || healthTrackingService == null) {
+            return@Runnable
+        }
+        onStatus("Samsung Health Sensor SDK connection timed out. Reconnecting.")
+        restart()
+    }
+
     fun start(): Boolean {
         val loadedSdk = runCatching { SamsungSpo2Sdk.load(context.classLoader) }
             .onFailure { onFallbackNeeded("Samsung Health Sensor SDK was not found in the app.") }
@@ -35,16 +45,20 @@ class SamsungSpo2Provider(
             ?: return false
 
         sdk = loadedSdk
+        val generation = ++connectionGeneration
         return runCatching {
-            val connectionListener = createConnectionListener(loadedSdk)
+            val connectionListener = createConnectionListener(loadedSdk, generation)
             healthTrackingService = loadedSdk.healthTrackingServiceClass
                 .getConstructor(loadedSdk.connectionListenerClass, Context::class.java)
                 .newInstance(connectionListener, context.applicationContext)
             healthTrackingService?.javaClass
                 ?.getMethod("connectService")
                 ?.invoke(healthTrackingService)
+            mainHandler.removeCallbacks(connectionTimeout)
+            mainHandler.postDelayed(connectionTimeout, SAMSUNG_CONNECTION_TIMEOUT_MS)
             onStatus("Samsung Health Sensor SDK connecting.")
         }.onFailure {
+            mainHandler.removeCallbacks(connectionTimeout)
             onFallbackNeeded("Samsung Health Sensor SDK connection setup failed: ${it.shortMessage()}")
         }.isSuccess
     }
@@ -53,7 +67,16 @@ class SamsungSpo2Provider(
         val loadedSdk = sdk
         val tracker = spo2Tracker
         if (loadedSdk == null || tracker == null || !isConnected) {
-            onStatus("Samsung SpO2 is not ready yet.")
+            val now = System.currentTimeMillis()
+            if (now - lastNotReadyStatusAt >= NOT_READY_LOG_INTERVAL_MS) {
+                lastNotReadyStatusAt = now
+                onStatus(
+                    "Samsung SpO2 is not ready yet. " +
+                        "sdkLoaded=${loadedSdk != null}, " +
+                        "trackerReady=${tracker != null}, " +
+                        "connected=$isConnected."
+                )
+            }
             return false
         }
 
@@ -78,8 +101,11 @@ class SamsungSpo2Provider(
     }
 
     fun stop() {
+        connectionGeneration++
         isMeasuring = false
+        isConnected = false
         mainHandler.removeCallbacks(measurementTimeout)
+        mainHandler.removeCallbacks(connectionTimeout)
         unsetTrackerListener()
         runCatching {
             healthTrackingService?.javaClass
@@ -92,20 +118,52 @@ class SamsungSpo2Provider(
         isConnected = false
     }
 
-    private fun createConnectionListener(loadedSdk: SamsungSpo2Sdk): Any {
+    private fun restart() {
+        stop()
+        start()
+    }
+
+    private fun isActiveGeneration(generation: Int): Boolean {
+        return generation == connectionGeneration
+    }
+
+    private fun createConnectionListener(loadedSdk: SamsungSpo2Sdk, generation: Int): Any {
         return Proxy.newProxyInstance(
             loadedSdk.classLoader,
             arrayOf(loadedSdk.connectionListenerClass),
         ) { _, method, args ->
             when (method.name) {
-                "onConnectionSuccess" -> mainHandler.post { handleConnectionSuccess(loadedSdk) }
+                "onConnectionSuccess" -> mainHandler.post {
+                    if (isActiveGeneration(generation)) {
+                        handleConnectionSuccess(loadedSdk)
+                    }
+                }
                 "onConnectionEnded" -> mainHandler.post {
+                    if (!isActiveGeneration(generation)) {
+                        return@post
+                    }
                     isConnected = false
-                    onStatus("Samsung Health Sensor SDK connection ended.")
+                    spo2Tracker = null
+                    onStatus("Samsung Health Sensor SDK connection ended. Reconnecting.")
+                    mainHandler.postDelayed(
+                        { if (isActiveGeneration(generation)) restart() },
+                        SAMSUNG_RECONNECT_DELAY_MS,
+                    )
                 }
                 "onConnectionFailed" -> {
                     val reason = args?.firstOrNull()?.shortMessage() ?: "unknown error"
-                    mainHandler.post { onFallbackNeeded("Samsung Health Platform connection failed: $reason") }
+                    mainHandler.post {
+                        if (!isActiveGeneration(generation)) {
+                            return@post
+                        }
+                        isConnected = false
+                        spo2Tracker = null
+                        onStatus("Samsung Health Platform connection failed: $reason Retrying.")
+                        mainHandler.postDelayed(
+                            { if (isActiveGeneration(generation)) restart() },
+                            SAMSUNG_RECONNECT_DELAY_MS,
+                        )
+                    }
                 }
             }
             proxyDefault(method)
@@ -113,6 +171,7 @@ class SamsungSpo2Provider(
     }
 
     private fun handleConnectionSuccess(loadedSdk: SamsungSpo2Sdk) {
+        mainHandler.removeCallbacks(connectionTimeout)
         runCatching {
             val service = healthTrackingService ?: throw IllegalStateException("HealthTrackingService is null")
             val trackerType = loadedSdk.spo2TrackerType()
@@ -122,9 +181,11 @@ class SamsungSpo2Provider(
             val supportedTrackers = capability.javaClass
                 .getMethod("getSupportHealthTrackerTypes")
                 .invoke(capability) as? Collection<*>
+            val supportedTrackerNames = supportedTrackers.formatTrackerNames()
+            onStatus("Samsung SpO2 supported trackers: $supportedTrackerNames")
 
             if (supportedTrackers?.any { it == trackerType || it.toString() == trackerType.toString() } != true) {
-                throw IllegalStateException("SPO2_ON_DEMAND is not supported on this watch.")
+                throw IllegalStateException("$trackerType is not supported on this watch. Supported: $supportedTrackerNames")
             }
 
             spo2Tracker = service.javaClass
@@ -133,6 +194,7 @@ class SamsungSpo2Provider(
             isConnected = true
             onStatus("Samsung SpO2 ready. Use Measure SpO2 for a real reading.")
         }.onFailure {
+            stop()
             onFallbackNeeded("Samsung SpO2 is unavailable: ${it.shortMessage()}")
         }
     }
@@ -244,6 +306,15 @@ class SamsungSpo2Provider(
         }
     }
 
+    private fun Collection<*>?.formatTrackerNames(): String {
+        val names = this
+            ?.filterNotNull()
+            ?.map { it.toString() }
+            ?.sorted()
+            ?: return "unknown"
+        return names.joinToString().ifBlank { "none" }
+    }
+
     private data class SamsungSpo2Sdk(
         val classLoader: ClassLoader,
         val connectionListenerClass: Class<*>,
@@ -306,5 +377,8 @@ class SamsungSpo2Provider(
     companion object {
         private const val SPO2_STATUS_COMPLETE = 2
         private const val SAMSUNG_SPO2_TIMEOUT_MS = 31_000L
+        private const val SAMSUNG_CONNECTION_TIMEOUT_MS = 15_000L
+        private const val SAMSUNG_RECONNECT_DELAY_MS = 5_000L
+        private const val NOT_READY_LOG_INTERVAL_MS = 15_000L
     }
 }
