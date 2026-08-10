@@ -49,6 +49,42 @@ class AnomalyDetectionTest {
         assertNull(sosId)
     }
 
+    @Test
+    fun `심박수 이상 저하 감지`() {
+        val payload = payload(heartRate = 39)
+        assertEquals("심박수 이상 저하 (39 bpm)", detectAnomalyLocally(payload))
+    }
+
+    @Test
+    fun `저체온 위험 감지`() {
+        val payload = payload(bodyTemp = 34.5)
+        assertEquals("저체온 위험 (34.5°C)", detectAnomalyLocally(payload))
+    }
+
+    @Test
+    fun `SpO2 0은 측정 실패로 간주해 이상 판정에서 제외`() {
+        val payload = payload(spo2 = 0.0)
+        assertNull(detectAnomalyLocally(payload))
+    }
+
+    @Test
+    fun `체온 0은 측정 실패로 간주해 이상 판정에서 제외`() {
+        val payload = payload(bodyTemp = 0.0)
+        assertNull(detectAnomalyLocally(payload))
+    }
+
+    @Test
+    fun `SpO2 90은 정상`() {
+        val payload = payload(spo2 = 90.0)
+        assertNull(detectAnomalyLocally(payload))
+    }
+
+    @Test
+    fun `체온 39도는 정상`() {
+        val payload = payload(bodyTemp = 39.0)
+        assertNull(detectAnomalyLocally(payload))
+    }
+
     private fun payload(
         heartRate: Int? = null,
         spo2: Double? = null,
