@@ -93,49 +93,6 @@ fun MainDashboard(bpm: Int, eta: String, distance: String) {
     }
 }
 
-@Composable
-fun BackendTestEntryScreen(onOpenBackendTest: () -> Unit) {
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(Color.Black)
-            .padding(16.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.Center
-    ) {
-        Icon(
-            imageVector = Icons.AutoMirrored.Filled.Send,
-            contentDescription = "Backend Test",
-            tint = Color(0xFF4ADE80),
-            modifier = Modifier.size(42.dp)
-        )
-
-        Spacer(modifier = Modifier.height(10.dp))
-
-        Text(
-            text = "백엔드 전송",
-            color = Color.White,
-            fontSize = 18.sp,
-            fontWeight = FontWeight.Bold
-        )
-
-        Spacer(modifier = Modifier.height(12.dp))
-
-        Button(
-            onClick = onOpenBackendTest,
-            colors = ButtonDefaults.buttonColors(backgroundColor = Color(0xFF4ADE80)),
-            modifier = Modifier.fillMaxWidth()
-        ) {
-            Text(
-                text = "테스트 열기",
-                color = Color.Black,
-                fontSize = 15.sp,
-                fontWeight = FontWeight.Bold
-            )
-        }
-    }
-}
-
 // 2. 이상 징후 감지 시 띄워줄 알림 화면 (30초 카운트다운 + 즉시신고/취소 버튼)
 @Composable
 fun AlertScreen(

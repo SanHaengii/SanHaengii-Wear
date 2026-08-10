@@ -71,7 +71,6 @@ class ComposeMainActivity : ComponentActivity(), DataClient.OnDataChangedListene
     private val mainHandler = Handler(Looper.getMainLooper())
     private lateinit var mainViewModel: MainViewModel
     private var currentPayload = HealthServicesPayload.empty()
-    private var isSending = false
     private var isExerciseRunning = false
     // 런타임 자격증명: 모바일 로그인 JWT+user_id를 Flask relay로 수신해 BuildConfig 값을 덮어씀 (재빌드 불필요)
     @Volatile private var runtimeToken: String? = null
@@ -277,15 +276,22 @@ class ComposeMainActivity : ComponentActivity(), DataClient.OnDataChangedListene
         mainHandler.postDelayed(healthAnomalyPollingRunnable, 5_000L)
     }
 
+    // SOS는 유실되면 안 되므로 (휘발성 메시지가 아닌) DataItem으로 발행한다.
+    // 워치에 최근 GPS 고정값이 캐시돼 있지 않으므로 좌표는 null로 보낸다 —
+    // 0.0 같은 가짜 좌표를 지어내면 구조대가 엉뚱한 곳으로 갈 수 있다.
     private fun notifySosTriggered() {
         scope.launch {
             try {
-                val nodes = Wearable.getNodeClient(this@ComposeMainActivity).connectedNodes.await()
-                nodes.forEach { node ->
-                    Wearable.getMessageClient(this@ComposeMainActivity)
-                        .sendMessage(node.id, "/sos_triggered", "SOS".toByteArray())
-                        .await()
-                }
+                val payload = buildSosRequestPayload(
+                    id = java.util.UUID.randomUUID().toString(),
+                    source = "watch_sos",
+                    lat = null,
+                    lng = null,
+                )
+                val req = payload.toPutDataMapRequest("/sos/request")
+                    .asPutDataRequest()
+                    .setUrgent()
+                Wearable.getDataClient(this@ComposeMainActivity).putDataItem(req).await()
             } catch (e: Exception) {
                 e.printStackTrace()
             }
@@ -957,45 +963,34 @@ class ComposeMainActivity : ComponentActivity(), DataClient.OnDataChangedListene
         )
     }
 
+    // 건강 샘플을 폰에 있는 모든 노드로 전송한다 (fire-and-forget: 표본 하나 유실은 허용).
+    // 백엔드로의 직접 전송은 더 이상 워치 책임이 아니다 — 폰이 게이트웨이 역할을 한다.
     private fun sendCollectedPayload() {
-        if (isSending) {
-            return
-        }
-
         val payloadForSend = stablePayloadForSend()
         if (!payloadForSend.hasCollectedRequiredValues()) {
             return
         }
 
-        val userId = currentUserId().toLongOrNull()
-        if (userId == null || userId <= 0L) {
-            return
-        }
-
-        val baseUrl = BuildConfig.HEALTH_API_BASE_URL.trim().trimEnd('/')
-        if (baseUrl.isBlank()) {
-            return
-        }
-
         currentPayload = payloadForSend
-        val requestBody = payloadForSend.toRequestBody(userId)
-        val token = currentToken()
-        isSending = true
+        val payload = buildHealthLivePayload(
+            hr = payloadForSend.heartRate ?: 0,
+            spo2 = payloadForSend.spo2 ?: 0.0,
+            temp = payloadForSend.bodyTemp ?: DEFAULT_BODY_TEMP,
+            steps = payloadForSend.steps ?: 0,
+        )
 
-        Thread {
-            val responseBody = runCatching {
-                postHealthDataWithResponse(baseUrl, token, requestBody)
-            }.getOrNull()
-
-            mainHandler.post {
-                isSending = false
-                // 백엔드 응답의 is_anomaly 기반 감지 (토큰 유효 시).
-                // 로컬 폴백 감지는 runLocalAnomalyCheck()가 게이트 없이 매 주기 수행한다.
-                if (!mainViewModel.isAnomalyDetected && responseBody != null) {
-                    handleHealthDataResponse(responseBody, payloadForSend)
+        scope.launch {
+            try {
+                val nodes = Wearable.getNodeClient(this@ComposeMainActivity).connectedNodes.await()
+                nodes.forEach { node ->
+                    Wearable.getMessageClient(this@ComposeMainActivity)
+                        .sendMessage(node.id, "/health/live", payload)
+                        .await()
                 }
+            } catch (e: Exception) {
+                e.printStackTrace()
             }
-        }.start()
+        }
     }
 
     private fun stablePayloadForSend(): HealthServicesPayload {
@@ -1021,56 +1016,55 @@ class ComposeMainActivity : ComponentActivity(), DataClient.OnDataChangedListene
         return (steps * CALORIES_PER_STEP).roundToOneDecimal()
     }
 
-    private fun postHealthDataWithResponse(baseUrl: String, token: String, body: String): String {
-        val connection = URL("$baseUrl/health/data").openConnection() as HttpURLConnection
-        try {
-            connection.requestMethod = "POST"
-            connection.connectTimeout = 15_000
-            connection.readTimeout = 15_000
-            connection.doOutput = true
-            connection.setRequestProperty("Accept", "application/json")
-            connection.setRequestProperty("Content-Type", "application/json; charset=utf-8")
-            if (token.isNotBlank()) {
-                connection.setRequestProperty("Authorization", "Bearer $token")
-            }
-            connection.outputStream.use { output ->
-                output.write(body.toByteArray(Charsets.UTF_8))
-            }
-            val code = connection.responseCode
-            val stream = if (code in 200..299) connection.inputStream else connection.errorStream
-            return stream?.bufferedReader(Charsets.UTF_8)?.use { it.readText() }.orEmpty()
-        } finally {
-            connection.disconnect()
-        }
-    }
-
-    // 백엔드 /health/data 응답 파싱 → 이상 감지 시 구조 프로토콜 트리거
-    private fun handleHealthDataResponse(responseBody: String, payload: HealthServicesPayload) {
-        val (isAnomaly, sosRequestId) = parseHealthDataResponse(responseBody)
-        if (isAnomaly) {
-            val message = detectAnomalyLocally(payload) ?: "생체 이상 징후 감지"
-            handleAnomalyDetected(message, sosRequestId)
-        }
-    }
-
     // 전송 게이트와 무관하게 현재 수집된 생체값으로 이상징후를 점검한다.
-    // 감지되면 자동으로 구조 프로토콜(30초 카운트다운 → /api/emergency)을 트리거한다.
+    // 감지되면 (a) 기존 온워치 UI(진동+카운트다운)를 그대로 띄우고,
+    // (b) 워치가 이상징후 감지의 단일 원천이므로 /anomaly DataItem을 폰에 발행한다.
     private fun runLocalAnomalyCheck() {
         if (mainViewModel.isAnomalyDetected) return
         if (System.currentTimeMillis() < anomalyCooldownUntilMs) return
         val message = detectAnomalyLocally(currentPayload) ?: return
-        handleAnomalyDetected(message, null)
+        if (handleAnomalyDetected(message, null)) {
+            publishAnomalyDataItem(message)
+        }
     }
 
-    private fun handleAnomalyDetected(message: String, sosRequestId: Int?) {
-        if (mainViewModel.isAnomalyDetected) return
+    // 이상징후 메시지 → /anomaly payload용 대략적인 타입 태그로 분류
+    private fun anomalyTypeFor(message: String): String = when {
+        message.contains("심박수 과부하") -> "hr_high"
+        message.contains("심박수 이상 저하") -> "hr_low"
+        message.contains("산소포화도") -> "spo2_low"
+        message.contains("고열") -> "temp_high"
+        message.contains("저체온") -> "temp_low"
+        else -> "unknown"
+    }
+
+    // /anomaly DataItem 발행 (urgent). 유실보다 지연이 나으므로 DataClient 사용.
+    private fun publishAnomalyDataItem(message: String) {
+        scope.launch {
+            try {
+                val req = buildAnomalyPayload(anomalyTypeFor(message), message)
+                    .toPutDataMapRequest("/anomaly")
+                    .asPutDataRequest()
+                    .setUrgent()
+                Wearable.getDataClient(this@ComposeMainActivity).putDataItem(req).await()
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+        }
+    }
+
+    // 이상징후를 트리거한다. 이미 감지 중이거나 쿨다운 중이면 아무 것도 하지 않고 false 반환.
+    // 반환값으로 "실제로 새로 트리거됐는지"를 호출부(예: /anomaly 발행)가 판단할 수 있게 한다.
+    private fun handleAnomalyDetected(message: String, sosRequestId: Int?): Boolean {
+        if (mainViewModel.isAnomalyDetected) return false
         // 직전 신고/취소 직후 동일 이상값으로 즉시 재트리거 방지
         // (모바일 연동 이상징후는 isMobileAnomalyAlert 분기에서 쿨다운을 이미 0으로 리셋)
-        if (System.currentTimeMillis() < anomalyCooldownUntilMs) return
+        if (System.currentTimeMillis() < anomalyCooldownUntilMs) return false
         mainViewModel.triggerAnomaly(message, sosRequestId)
         startAnomalyCountdown()
         // 진동으로 사용자 주의 환기 (화면을 보고 있지 않아도 감지 가능)
         vibrateAlert()
+        return true
     }
 
     private fun startAnomalyCountdown() {
