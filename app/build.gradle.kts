@@ -59,6 +59,13 @@ android {
                 keyPassword = keystoreProperties.getProperty("keyPassword")
             }
         }
+        // 모바일(Expo) 앱과 동일한 디버그 키를 사용 (Data Layer는 서명이 다르면 조용히 실패함)
+        create("sharedDebug") {
+            storeFile = file(System.getProperty("user.home") + "/sanhaengii-shared-debug.keystore")
+            storePassword = "android"
+            keyAlias = "androiddebugkey"
+            keyPassword = "android"
+        }
     }
 
     buildTypes {
@@ -71,6 +78,9 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
+        }
+        getByName("debug") {
+            signingConfig = signingConfigs.getByName("sharedDebug")
         }
     }
 
