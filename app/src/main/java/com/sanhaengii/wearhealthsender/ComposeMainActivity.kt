@@ -1289,14 +1289,17 @@ class ComposeMainActivity : ComponentActivity(), DataClient.OnDataChangedListene
             .apply()
     }
 
-    // Flask relay에서 모바일이 push한 최신 user_id+JWT를 받아 런타임/영구 저장에 반영
+    // 모바일이 watch_credentials에 push한 최신 user_id+JWT를 받아 런타임/영구 저장에 반영.
+    // 모바일은 watch-credentials를 Railway(AUTH_API_BASE_URL)로 POST하므로, 워치도 반드시
+    // 동일한 HEALTH_API_BASE_URL(Railway)에서 읽어야 같은 user_id로 매핑됨.
+    // (TRAIL_API_BASE_URL=로컬 Flask 10.0.2.2:5001을 보면 매핑 실패 → 하드코딩 user_id 폴백)
     private fun fetchWatchCredentials() {
-        val trailUrl = BuildConfig.TRAIL_API_BASE_URL.trim().trimEnd('/')
-        if (trailUrl.isBlank()) return
+        val baseUrl = BuildConfig.HEALTH_API_BASE_URL.trim().trimEnd('/')
+        if (baseUrl.isBlank()) return
 
         scope.launch(Dispatchers.IO) {
             runCatching {
-                val connection = URL("$trailUrl/api/watch-credentials/latest")
+                val connection = URL("$baseUrl/api/watch-credentials/latest")
                     .openConnection() as HttpURLConnection
                 connection.requestMethod = "GET"
                 connection.connectTimeout = 5_000
