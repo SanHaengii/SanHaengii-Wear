@@ -5,7 +5,6 @@ package com.sanhaengii.app
 import android.Manifest
 import android.annotation.SuppressLint
 import android.content.Context
-import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
@@ -45,7 +44,6 @@ import androidx.health.services.client.data.ExerciseLapSummary
 import androidx.health.services.client.data.ExerciseType
 import androidx.health.services.client.data.ExerciseTrackedStatus
 import com.sanhaengii.app.ui.AlertScreen
-import com.sanhaengii.app.ui.BackendTestEntryScreen
 import com.sanhaengii.app.ui.MainDashboard
 import com.sanhaengii.app.ui.SosScreen
 import kotlinx.coroutines.CoroutineScope
@@ -221,7 +219,7 @@ class ComposeMainActivity : ComponentActivity(), DataClient.OnDataChangedListene
             }
 
             MaterialTheme {
-                val pagerState = rememberPagerState(pageCount = { 3 })
+                val pagerState = rememberPagerState(pageCount = { 2 })
 
                 if (mainViewModel.isAnomalyDetected) {
                     val isSending = mainViewModel.emergencySendState == "sending"
@@ -258,13 +256,6 @@ class ComposeMainActivity : ComponentActivity(), DataClient.OnDataChangedListene
                                     sendEmergencyManual()
                                     // Also notify phone nodes for UI sync
                                     notifySosTriggered()
-                                }
-                            )
-                            2 -> BackendTestEntryScreen(
-                                onOpenBackendTest = {
-                                    startActivity(
-                                        Intent(this@ComposeMainActivity, MainActivity::class.java)
-                                    )
                                 }
                             )
                         }
