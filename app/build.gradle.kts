@@ -34,11 +34,11 @@ if (hasReleaseSigning) {
 }
 
 android {
-    namespace = "com.sanhaengii.wearhealthsender"
+    namespace = "com.sanhaengii.app"
     compileSdk = 36 // 🚀 수정: 안정적인 34 버전으로 하향
 
     defaultConfig {
-        applicationId = "com.sanhaengii.wearhealthsender"
+        applicationId = "com.sanhaengii.app"
         minSdk = 30
         targetSdk = 34 // 🚀 수정
         versionCode = 1

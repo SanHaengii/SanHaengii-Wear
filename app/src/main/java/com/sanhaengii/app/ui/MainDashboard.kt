@@ -1,4 +1,4 @@
-package com.sanhaengii.wearhealthsender.ui
+package com.sanhaengii.app.ui
 
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.background

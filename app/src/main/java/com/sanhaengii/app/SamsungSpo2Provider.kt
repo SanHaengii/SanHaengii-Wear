@@ -1,4 +1,4 @@
-package com.sanhaengii.wearhealthsender
+package com.sanhaengii.app
 
 import android.content.Context
 import android.os.Handler

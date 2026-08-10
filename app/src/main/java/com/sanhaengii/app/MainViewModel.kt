@@ -1,4 +1,4 @@
-package com.sanhaengii.wearhealthsender
+package com.sanhaengii.app
 
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf

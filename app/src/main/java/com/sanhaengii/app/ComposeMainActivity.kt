@@ -1,6 +1,6 @@
 @file:Suppress("DEPRECATION", "OVERRIDE_DEPRECATION")
 
-package com.sanhaengii.wearhealthsender
+package com.sanhaengii.app
 
 import android.Manifest
 import android.annotation.SuppressLint
@@ -44,10 +44,10 @@ import androidx.health.services.client.data.ExerciseEvent
 import androidx.health.services.client.data.ExerciseLapSummary
 import androidx.health.services.client.data.ExerciseType
 import androidx.health.services.client.data.ExerciseTrackedStatus
-import com.sanhaengii.wearhealthsender.ui.AlertScreen
-import com.sanhaengii.wearhealthsender.ui.BackendTestEntryScreen
-import com.sanhaengii.wearhealthsender.ui.MainDashboard
-import com.sanhaengii.wearhealthsender.ui.SosScreen
+import com.sanhaengii.app.ui.AlertScreen
+import com.sanhaengii.app.ui.BackendTestEntryScreen
+import com.sanhaengii.app.ui.MainDashboard
+import com.sanhaengii.app.ui.SosScreen
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
