@@ -1,6 +1,5 @@
 package com.sanhaengii.app
 
-import org.json.JSONObject
 import java.time.OffsetDateTime
 import java.time.ZoneId
 import java.time.temporal.ChronoUnit
@@ -16,23 +15,6 @@ data class HealthServicesPayload(
     val bloodPressureSystolic: Int?,
     val bloodPressureDiastolic: Int?,
 ) {
-    fun toJson(userId: Long): JSONObject {
-        return JSONObject()
-            .put("user_id", userId)
-            .put("measured_at", measuredAt)
-            .putNullable("heart_rate", heartRate)
-            .putNullable("steps", steps)
-            .putNullable("calories", calories)
-            .putNullable("spo2", spo2)
-            .putNullable("body_temp", bodyTemp)
-            .putNullable("blood_pressure_systolic", bloodPressureSystolic)
-            .putNullable("blood_pressure_diastolic", bloodPressureDiastolic)
-    }
-
-    fun toRequestBody(userId: Long): String {
-        return toJson(userId).toString()
-    }
-
     fun toDisplayText(): String {
         return """
             HR: ${heartRate.display("bpm")}
@@ -107,10 +89,6 @@ private fun nowKstIsoString(): String {
     return OffsetDateTime.now(KST_ZONE)
         .truncatedTo(ChronoUnit.SECONDS)
         .toString()
-}
-
-private fun JSONObject.putNullable(key: String, value: Any?): JSONObject {
-    return put(key, value ?: JSONObject.NULL)
 }
 
 private fun Int?.display(suffix: String = ""): String {

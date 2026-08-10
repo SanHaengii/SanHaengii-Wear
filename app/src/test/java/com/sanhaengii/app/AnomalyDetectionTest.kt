@@ -36,20 +36,6 @@ class AnomalyDetectionTest {
     }
 
     @Test
-    fun `parseHealthDataResponse는 is_anomaly 필드를 파싱`() {
-        val (isAnomaly, sosId) = parseHealthDataResponse("""{"is_anomaly": true, "sos_request_id": 42}""")
-        assertEquals(true, isAnomaly)
-        assertEquals(42, sosId)
-    }
-
-    @Test
-    fun `parseHealthDataResponse는 잘못된 JSON에 대해 false와 null을 반환`() {
-        val (isAnomaly, sosId) = parseHealthDataResponse("not json")
-        assertEquals(false, isAnomaly)
-        assertNull(sosId)
-    }
-
-    @Test
     fun `심박수 이상 저하 감지`() {
         val payload = payload(heartRate = 39)
         assertEquals("심박수 이상 저하 (39 bpm)", detectAnomalyLocally(payload))
