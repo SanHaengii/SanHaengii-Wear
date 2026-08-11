@@ -1,6 +1,4 @@
-package com.sanhaengii.wearhealthsender
-
-import org.json.JSONObject
+package com.sanhaengii.app
 
 // HR>160 | HR<40 | SpO2<90% | 체온>39°C | 체온<35°C (모바일 앱 기준과 동일)
 // 값이 0이면 "측정 실패"로 보고 이상 판정에서 제외(오탐·오신고 방지).
@@ -18,21 +16,4 @@ fun detectAnomalyLocally(payload: HealthServicesPayload): String? {
         if (temp > 0.0 && temp < 35.0) return "저체온 위험 (${temp}°C)"
     }
     return null
-}
-
-// /health/data 백엔드 응답 파싱 → (이상 감지 여부, sos_request_id)
-// Railway 백엔드: {is_anomaly, message, anomaly_type}
-// sos_alerts.py 로컬: {anomaly, sos_request_id}
-// 두 형식 모두 지원한다.
-fun parseHealthDataResponse(responseBody: String): Pair<Boolean, Int?> {
-    return try {
-        val json = JSONObject(responseBody)
-        val isAnomaly = json.optBoolean("is_anomaly", false) || json.optBoolean("anomaly", false)
-        val sosRequestId = if (json.has("sos_request_id") && !json.isNull("sos_request_id")) {
-            json.getInt("sos_request_id")
-        } else null
-        Pair(isAnomaly, sosRequestId)
-    } catch (_: Exception) {
-        Pair(false, null)
-    }
 }

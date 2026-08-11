@@ -1,11 +1,10 @@
 @file:Suppress("DEPRECATION", "OVERRIDE_DEPRECATION")
 
-package com.sanhaengii.wearhealthsender
+package com.sanhaengii.app
 
 import android.Manifest
 import android.annotation.SuppressLint
 import android.content.Context
-import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
@@ -44,10 +43,9 @@ import androidx.health.services.client.data.ExerciseEvent
 import androidx.health.services.client.data.ExerciseLapSummary
 import androidx.health.services.client.data.ExerciseType
 import androidx.health.services.client.data.ExerciseTrackedStatus
-import com.sanhaengii.wearhealthsender.ui.AlertScreen
-import com.sanhaengii.wearhealthsender.ui.BackendTestEntryScreen
-import com.sanhaengii.wearhealthsender.ui.MainDashboard
-import com.sanhaengii.wearhealthsender.ui.SosScreen
+import com.sanhaengii.app.ui.AlertScreen
+import com.sanhaengii.app.ui.MainDashboard
+import com.sanhaengii.app.ui.SosScreen
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -62,8 +60,6 @@ import kotlin.coroutines.resume
 import android.location.Location
 import android.location.LocationListener
 import android.location.LocationManager
-import org.json.JSONArray
-import org.json.JSONObject
 import java.net.HttpURLConnection
 import java.net.URL
 import kotlin.math.roundToInt
@@ -73,57 +69,12 @@ class ComposeMainActivity : ComponentActivity(), DataClient.OnDataChangedListene
     private val mainHandler = Handler(Looper.getMainLooper())
     private lateinit var mainViewModel: MainViewModel
     private var currentPayload = HealthServicesPayload.empty()
-    private var isSending = false
     private var isExerciseRunning = false
     // 런타임 자격증명: 모바일 로그인 JWT+user_id를 Flask relay로 수신해 BuildConfig 값을 덮어씀 (재빌드 불필요)
     @Volatile private var runtimeToken: String? = null
     @Volatile private var runtimeUserId: String? = null
     // 이상징후 자동 구조 요청 후/취소 후 재트리거 억제 시각 (스팸 방지)
     private var anomalyCooldownUntilMs = 0L
-    // 모바일이 소유한 산행 레코드 id (상태 PUT 대상). 서버 폴링으로 채워짐
-    @Volatile private var activeHikingRecordId: Long? = null
-    // 현재 워치가 따라가고 있는(동기화 중인) 산행 레코드 id
-    @Volatile private var syncedHikingRecordId: Long? = null
-    // 모바일 앱에서 이상징후를 감지해 "anomaly" 신호를 보낸 경우 true
-    // (취소 시 putHikingStatus("active")로 응답해야 함)
-    @Volatile private var isMobileAnomalyAlert = false
-    private var hikingStartedAtMs = 0L
-    private var totalHikingMinutes = 0
-    private var totalHikingDistanceKm = 0.0
-
-    private val hikingStatusRunnable = object : Runnable {
-        override fun run() {
-            if (mainViewModel.isHikingActive) {
-                // 1) 마지막 동기화 기준점으로 분 단위 카운트다운 (polling 사이에도 줄어듦)
-                refreshEtaFromElapsed()
-                // 2) 모바일 ETA 알고리즘 최신값으로 재동기화
-                fetchRelayStatus()
-                mainHandler.postDelayed(this, HIKING_STATUS_INTERVAL_MS)
-            }
-        }
-    }
-    // 모바일 로그인 토큰을 주기적으로 Flask relay에서 받아옴 (산행 여부와 무관하게 상시 동작)
-    private val credentialSyncRunnable = object : Runnable {
-        override fun run() {
-            fetchWatchCredentials()
-            mainHandler.postDelayed(this, CREDENTIAL_SYNC_INTERVAL_MS)
-        }
-    }
-    // 모바일 산행 상태(active/paused/completed)를 상시 폴링해 워치에 반영 (시작/정지/중단 동기화)
-    private val mobileHikingSyncRunnable = object : Runnable {
-        override fun run() {
-            syncHikingStateFromServer()
-            mainHandler.postDelayed(this, MOBILE_SYNC_INTERVAL_MS)
-        }
-    }
-    // DB 최신 건강 데이터를 상시 폴링해 이상징후 감지 → 워치에 AlertScreen 표시
-    // 산행 여부와 무관하게 항상 동작 (모바일 WatchHealthContext 역할을 워치에서 직접 수행)
-    private val healthAnomalyPollingRunnable = object : Runnable {
-        override fun run() {
-            pollHealthDataForAnomaly()
-            mainHandler.postDelayed(this, HEALTH_ANOMALY_POLL_INTERVAL_MS)
-        }
-    }
     private var nextFakeSpo2 = 100
     private var lastSpo2: Double? = null
     private var lastHeartRate: Int? = null
@@ -189,6 +140,27 @@ class ComposeMainActivity : ComponentActivity(), DataClient.OnDataChangedListene
         }
     }
 
+    // 디버그 진단용: 연결된 노드(폰) 수를 5초마다 갱신. 산행 활성 여부와 무관하게
+    // 앱이 떠 있는 동안 항상 동작해야 "페어링 안 됨"을 언제든 확인할 수 있다.
+    private val nodeCountPollRunnable = object : Runnable {
+        override fun run() {
+            pollConnectedNodeCount()
+            mainHandler.postDelayed(this, NODE_COUNT_POLL_INTERVAL_MS)
+        }
+    }
+
+    private fun pollConnectedNodeCount() {
+        if (!::mainViewModel.isInitialized) return
+        scope.launch {
+            try {
+                val nodes = Wearable.getNodeClient(this@ComposeMainActivity).connectedNodes.await()
+                mainViewModel.updateConnectedNodeCount(nodes.size)
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+        }
+    }
+
     private val exerciseClient by lazy { HealthServices.getClient(this).exerciseClient }
     private val exerciseUpdateCallback = object : ExerciseUpdateCallback {
         override fun onExerciseUpdateReceived(update: ExerciseUpdate) {
@@ -221,7 +193,7 @@ class ComposeMainActivity : ComponentActivity(), DataClient.OnDataChangedListene
             }
 
             MaterialTheme {
-                val pagerState = rememberPagerState(pageCount = { 3 })
+                val pagerState = rememberPagerState(pageCount = { 2 })
 
                 if (mainViewModel.isAnomalyDetected) {
                     val isSending = mainViewModel.emergencySendState == "sending"
@@ -229,7 +201,6 @@ class ComposeMainActivity : ComponentActivity(), DataClient.OnDataChangedListene
                         message = mainViewModel.anomalyMessage,
                         isWarning = true,
                         countdown = if (isSending) null else mainViewModel.anomalyCountdown,
-                        cancelLabel = if (mainViewModel.isMobileAnomalySource) "괜찮아요" else "취소",
                         emergencySendState = mainViewModel.emergencySendState,
                         // 전송 중엔 버튼 비활성 (중복 탭 방지)
                         onConfirm = if (isSending) null else {{ confirmAnomalyEmergency() }},
@@ -244,7 +215,9 @@ class ComposeMainActivity : ComponentActivity(), DataClient.OnDataChangedListene
                             0 -> MainDashboard(
                                 bpm = mainViewModel.bpm,
                                 eta = mainViewModel.eta,
-                                distance = mainViewModel.distance
+                                distance = mainViewModel.distance,
+                                connectedNodeCount = mainViewModel.connectedNodeCount,
+                                lastReceivedAtMs = mainViewModel.lastReceivedAtMs,
                             )
                             1 -> SosScreen(
                                 isHikingActive = mainViewModel.isHikingActive,
@@ -260,13 +233,6 @@ class ComposeMainActivity : ComponentActivity(), DataClient.OnDataChangedListene
                                     notifySosTriggered()
                                 }
                             )
-                            2 -> BackendTestEntryScreen(
-                                onOpenBackendTest = {
-                                    startActivity(
-                                        Intent(this@ComposeMainActivity, MainActivity::class.java)
-                                    )
-                                }
-                            )
                         }
                     }
                 }
@@ -274,27 +240,65 @@ class ComposeMainActivity : ComponentActivity(), DataClient.OnDataChangedListene
         }
 
         Wearable.getDataClient(this).addListener(this)
+        // addListener는 등록 "이후" 변경만 전달한다 — 스토어에 이미 있던 /auth, /hike/state,
+        // /sos/ack는 재생되지 않는다. 신규 설치나 (워치 앱이 닫혀 있던 동안) 재로그인 뒤 워치
+        // 앱을 열면 이 이벤트를 영영 못 받아 토큰/유저ID가 비거나 stale해지므로, 시작 시 한 번
+        // 기존 값을 훑어 onDataChanged와 동일한 parse/apply 경로로 반영한다.
+        sweepExistingDataItems()
+        mainHandler.post(nodeCountPollRunnable)
 
-        // 저장된 토큰 복원 후, 모바일 로그인 토큰 상시 동기화 시작
+        // 저장된 자격증명/생체값 복원. 자격증명·산행상태·이상징후는 이제 모두
+        // /auth, /hike/state, /sos/ack Data Layer 이벤트로 폰이 직접 밀어준다 (onDataChanged 참고).
         loadSavedToken()
         loadSavedHeartRate()
         loadSavedSpo2()
-        mainHandler.post(credentialSyncRunnable)
-        // 모바일 산행 상태 상시 동기화 시작 (모바일 시작/정지/중단 → 워치 반영)
-        mainHandler.post(mobileHikingSyncRunnable)
-        // DB 건강 데이터 상시 폴링 → 이상징후 워치 알림 (산행 여부 무관)
-        mainHandler.postDelayed(healthAnomalyPollingRunnable, 5_000L)
     }
 
-    private fun notifySosTriggered() {
+    // 리스너 등록 전부터 스토어에 있던 DataItem을 한 번 훑어 반영한다.
+    // 실패해도 앱을 죽이면 안 되므로 전체를 방어적으로 감싼다.
+    private fun sweepExistingDataItems() {
         scope.launch {
             try {
-                val nodes = Wearable.getNodeClient(this@ComposeMainActivity).connectedNodes.await()
-                nodes.forEach { node ->
-                    Wearable.getMessageClient(this@ComposeMainActivity)
-                        .sendMessage(node.id, "/sos_triggered", "SOS".toByteArray())
-                        .await()
+                val dataItems = Wearable.getDataClient(this@ComposeMainActivity).dataItems.await()
+                try {
+                    for (item in dataItems) {
+                        val map = DataMapItem.fromDataItem(item).dataMap.toPlainMap()
+                        when (item.uri.path) {
+                            "/auth" -> applyAuthPayload(parseAuthPayload(map))
+                            "/hike/state" -> applyHikeStatePayload(parseHikeStatePayload(map))
+                            "/sos/ack" -> applySosAckPayload(parseSosAckPayload(map))
+                        }
+                    }
+                } finally {
+                    dataItems.release()
                 }
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+        }
+    }
+
+    // SOS는 유실되면 안 되므로 (휘발성 메시지가 아닌) DataItem으로 발행한다.
+    // 워치에 최근 GPS 고정값이 캐시돼 있지 않으므로 좌표는 null로 보낸다 —
+    // 0.0 같은 가짜 좌표를 지어내면 구조대가 엉뚱한 곳으로 갈 수 있다.
+    // id/source는 호출측이 지정할 수 있다 — 이상징후 경로(F3)가 동일 id를 postEmergency의
+    // HTTP body에도 실어 보내, 폰이 같은 사건을 두 번(오프라인 큐 + HTTP) 접수하지 않게 한다.
+    private fun notifySosTriggered(
+        id: String = java.util.UUID.randomUUID().toString(),
+        source: String = "watch_sos",
+    ) {
+        scope.launch {
+            try {
+                val payload = buildSosRequestPayload(
+                    id = id,
+                    source = source,
+                    lat = null,
+                    lng = null,
+                )
+                val req = payload.toPutDataMapRequest("/sos/request")
+                    .asPutDataRequest()
+                    .setUrgent()
+                Wearable.getDataClient(this@ComposeMainActivity).putDataItem(req).await()
             } catch (e: Exception) {
                 e.printStackTrace()
             }
@@ -394,7 +398,10 @@ class ComposeMainActivity : ComponentActivity(), DataClient.OnDataChangedListene
      * 백엔드 /api/emergency 필수 필드를 항상 포함하는 JSON body 생성.
      *  - userId : 필수. 비어있으면 null이 아니라 예외를 던져 호출부에서 "failed" 처리.
      *  - eventType, location, timestamp : 항상 포함.
-     *  - 추가 필드(triggeredBy, reason)는 옵션.
+     *  - 추가 필드(triggeredBy, reason, requestId)는 옵션.
+     *  - requestId : 같은 사건으로 발행한 /sos/request DataItem의 id와 동일한 값을 실어 보내면,
+     *    폰이 두 전송 경로(Data Layer 오프라인 큐 + 이 HTTP 직접 호출)를 같은 사건으로 식별해
+     *    중복 접수를 피할 수 있다.
      */
     private fun buildEmergencyBody(
         eventType: String,
@@ -402,10 +409,11 @@ class ComposeMainActivity : ComponentActivity(), DataClient.OnDataChangedListene
         lng: Double,
         triggeredBy: String? = null,
         reason: String? = null,
+        requestId: String? = null,
     ): String {
         val userIdVal = currentUserId().trim()
         check(userIdVal.isNotBlank()) {
-            "userId가 비어있습니다. npm run sync-watch 실행 후 워치 앱을 재빌드하세요."
+            "userId가 비어있습니다. 모바일 앱에 로그인한 뒤 워치 앱을 다시 열어 /auth를 재수신하세요."
         }
         val timestamp = java.time.Instant.now().toString()
         return buildString {
@@ -414,6 +422,7 @@ class ComposeMainActivity : ComponentActivity(), DataClient.OnDataChangedListene
             append("\"eventType\":\"$eventType\",")
             if (triggeredBy != null) append("\"triggered_by\":\"$triggeredBy\",")
             if (reason != null) append("\"reason\":${escapeJson(reason)},")
+            if (requestId != null) append("\"requestId\":${escapeJson(requestId)},")
             append("\"location\":{\"lat\":$lat,\"lng\":$lng},")
             append("\"timestamp\":\"$timestamp\"")
             append("}")
@@ -471,25 +480,80 @@ class ComposeMainActivity : ComponentActivity(), DataClient.OnDataChangedListene
     }
 
     override fun onDataChanged(dataEvents: com.google.android.gms.wearable.DataEventBuffer) {
+        if (!::mainViewModel.isInitialized) return
         dataEvents.forEach { event ->
-            if (event.type == DataEvent.TYPE_CHANGED) {
-                val path = event.dataItem.uri.path
-                if (path == "/hiking_info") {
-                    val dataMap = DataMapItem.fromDataItem(event.dataItem).dataMap
-                    val eta = dataMap.getString("eta", "-")
-                    val distance = dataMap.getString("distance", "-")
-                    val bpm = dataMap.getInt("bpm", 0)
-                    mainViewModel.updateEta(eta)
-                    mainViewModel.updateDistance(distance)
-                    if (bpm > 0) mainViewModel.updateHeartRate(bpm)
-                } else if (path == "/sos_status") {
-                    val dataMap = DataMapItem.fromDataItem(event.dataItem).dataMap
-                    val status = dataMap.getString("status")
-                    if (status == "finished") {
-                        mainViewModel.resetSosReporting()
-                    }
+            if (event.type != DataEvent.TYPE_CHANGED) return@forEach
+            val map = DataMapItem.fromDataItem(event.dataItem).dataMap.toPlainMap()
+            when (event.dataItem.uri.path) {
+                "/auth" -> {
+                    applyAuthPayload(parseAuthPayload(map))
+                    mainViewModel.markDataReceived()
+                }
+                "/hike/state" -> {
+                    applyHikeStatePayload(parseHikeStatePayload(map))
+                    mainViewModel.markDataReceived()
+                }
+                "/sos/ack" -> {
+                    applySosAckPayload(parseSosAckPayload(map))
+                    mainViewModel.markDataReceived()
                 }
             }
+        }
+    }
+
+    // /auth: 모바일 로그인 자격증명 수신. fetchWatchCredentials()가 하던 영구 저장을 그대로 수행해
+    // SOS HTTP 폴백(postEmergency)이 폰 없이도 최신 토큰/user_id로 계속 동작하게 한다.
+    private fun applyAuthPayload(payload: AuthPayload) {
+        val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        if (payload.token.isNotBlank() && payload.token != runtimeToken) {
+            runtimeToken = payload.token
+            prefs.edit().putString(PREF_KEY_TOKEN, payload.token).apply()
+            println("[AUTH] 모바일 토큰 수신·갱신 (…${payload.token.takeLast(6)})")
+        }
+        if (payload.userId > 0) {
+            val userIdStr = payload.userId.toString()
+            if (userIdStr != runtimeUserId) {
+                runtimeUserId = userIdStr
+                prefs.edit().putString(PREF_KEY_USER_ID, userIdStr).apply()
+                println("[AUTH] 모바일 user_id 수신·갱신 ($userIdStr)")
+            }
+        }
+    }
+
+    // /hike/state: 모바일이 소유한 산행 상태를 워치에 반영. syncHikingStateFromServer()가 폴링해
+    // 구동하던 것과 같은 전이(시작/일시정지/재개/종료)를 그대로 따르되, 상태를 GET하는 대신
+    // 폰이 push한 값을 직접 사용한다. "anomaly" 상태 전이는 없앴다 — 이상징후 감지는 이제
+    // 워치가 직접 수행해 /anomaly로 발행하므로, 폰이 산행 상태를 통해 알릴 필요가 없다.
+    private fun applyHikeStatePayload(payload: HikeStatePayload) {
+        if (!::mainViewModel.isInitialized) return
+        mainViewModel.updateEta("${payload.etaMin}분")
+        mainViewModel.updateDistance(String.format("%.2f", payload.remainKm) + "km")
+
+        if (payload.active) {
+            when {
+                !mainViewModel.isHikingActive -> startHikingFromWatch()
+                mainViewModel.isPaused && !payload.paused -> applyResumeLocal()
+                !mainViewModel.isPaused && payload.paused -> applyPauseLocal()
+            }
+        } else if (mainViewModel.isHikingActive) {
+            stopHikingFromWatch()
+        }
+    }
+
+    // /sos/ack: 폰이 SOS 처리 결과를 알려오면 전송 상태 UI(AlertScreen/SosScreen)에 반영한다.
+    // 워치 어휘는 idle/sending/success/failed뿐이고 폰은 추가로 queued(모바일도 오프라인이라
+    // 로컬 대기 중)를 보낼 수 있다. 알 수 없는 값은 무시 — UI 어떤 분기도 못 받는 상태로
+    // 전이시키면 안 된다. queued는 아직 최종 상태가 아니므로 sending과 함께 SOS 리포팅 진행
+    // 중으로 취급한다.
+    private fun applySosAckPayload(payload: SosAckPayload) {
+        if (!::mainViewModel.isInitialized) return
+        val state = when (payload.state) {
+            "sending", "success", "failed", "queued" -> payload.state
+            else -> return
+        }
+        mainViewModel.emergencySendState = state
+        if (state != "sending" && state != "queued") {
+            mainViewModel.resetSosReporting()
         }
     }
 
@@ -497,8 +561,8 @@ class ComposeMainActivity : ComponentActivity(), DataClient.OnDataChangedListene
     private fun toggleHikingFromWatch() {
         if (!mainViewModel.isHikingActive) {
             startHikingFromWatch()
-            // 모바일 레코드가 이미 있으면 active로 동기화(없으면 id 없어 no-op)
-            putHikingStatus("active")
+            // 모바일에 산행 활성 상태를 알림(모바일에 레코드가 없으면 모바일 쪽에서 무시)
+            notifyHikeControl("resume")
         } else if (!mainViewModel.isPaused) {
             pauseHikingFromWatch()
         } else {
@@ -509,209 +573,49 @@ class ComposeMainActivity : ComponentActivity(), DataClient.OnDataChangedListene
     // 정지 = 일시정지 (세션 유지, 양쪽 동기화)
     private fun pauseHikingFromWatch() {
         applyPauseLocal()
-        putHikingStatus("paused")
+        notifyHikeControl("pause")
     }
 
     private fun resumeHikingFromWatch() {
         applyResumeLocal()
-        putHikingStatus("active")
+        notifyHikeControl("resume")
     }
 
-    // 일시정지 로컬 적용(전송 중단·ETA 카운트다운 정지). 서버 PUT은 호출측에서 결정
+    // 일시정지 로컬 적용(생체값 전송 중단). 모바일 알림은 호출측(pauseHikingFromWatch 등)이
+    // notifyHikeControl()로 처리한다 — 직접적인 백엔드 PUT 호출은 없음(폰이 게이트웨이).
     private fun applyPauseLocal() {
         mainViewModel.updatePaused(true)
         mainHandler.removeCallbacks(periodicHealthSendRunnable)
-        mainHandler.removeCallbacks(hikingStatusRunnable)
     }
 
     private fun applyResumeLocal() {
         mainViewModel.updatePaused(false)
         mainHandler.removeCallbacks(periodicHealthSendRunnable)
         mainHandler.postDelayed(periodicHealthSendRunnable, HEALTH_SEND_INTERVAL_MS)
-        mainHandler.removeCallbacks(hikingStatusRunnable)
-        mainHandler.postDelayed(hikingStatusRunnable, HIKING_STATUS_INTERVAL_MS)
     }
 
     // 중단하기 = 완전 종료(기록 저장 status=completed). 양쪽 종료
     private fun abortHikingFromWatch() {
-        putHikingStatus("completed")
-        syncedHikingRecordId = null
+        notifyHikeControl("abort")
         stopHikingFromWatch()
     }
 
-    // 산행 레코드 status를 백엔드에 PUT (active/paused/completed). recordId 없으면 무시
-    private fun putHikingStatus(status: String) {
-        val recordId = activeHikingRecordId ?: return
-        val baseUrl = BuildConfig.HEALTH_API_BASE_URL.trim().trimEnd('/')
-        if (baseUrl.isBlank()) return
-        val token = currentToken()
-        scope.launch(Dispatchers.IO) {
-            runCatching {
-                val connection = URL("$baseUrl/data/hiking_records/$recordId")
-                    .openConnection() as HttpURLConnection
-                connection.requestMethod = "PUT"
-                connection.connectTimeout = 5_000
-                connection.readTimeout = 5_000
-                connection.doOutput = true
-                connection.setRequestProperty("Content-Type", "application/json; charset=utf-8")
-                connection.setRequestProperty("Accept", "application/json")
-                if (token.isNotBlank()) connection.setRequestProperty("Authorization", "Bearer $token")
-                connection.outputStream.use { it.write("""{"status":"$status"}""".toByteArray(Charsets.UTF_8)) }
-                connection.responseCode
-                connection.disconnect()
-            }
-        }
-    }
-
-    // 모바일 산행 상태를 폴링해 워치에 반영 (시작/정지/중단 동기화)
-    /**
-     * DB의 최신 건강 데이터(/health/data/latest)를 10초마다 폴링해 이상징후를 감지합니다.
-     * 산행 여부와 무관하게 항상 동작. 모바일 WatchHealthContext와 동일한 임계값 사용.
-     * 감지 시 → 진동 + AlertScreen 표시 + 30초 카운트다운 → /api/emergency 자동 신고.
-     */
-    private fun pollHealthDataForAnomaly() {
-        val baseUrl = BuildConfig.HEALTH_API_BASE_URL.trim().trimEnd('/')
-        val token = currentToken()
-        if (baseUrl.isBlank() || token.isBlank()) return
-
-        scope.launch(Dispatchers.IO) {
-            runCatching {
-                val connection = URL("$baseUrl/health/data/latest")
-                    .openConnection() as HttpURLConnection
-                connection.requestMethod = "GET"
-                connection.connectTimeout = 5_000
-                connection.readTimeout = 5_000
-                connection.setRequestProperty("Accept", "application/json")
-                connection.setRequestProperty("Authorization", "Bearer $token")
-                val code = connection.responseCode
-                if (code !in 200..299) { connection.disconnect(); return@runCatching }
-                val text = connection.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }
-                connection.disconnect()
-
-                // 응답 파싱 → HealthServicesPayload로 변환
-                val json = org.json.JSONObject(text)
-                val data = if (json.has("data") && !json.isNull("data")) json.getJSONObject("data") else json
-                val hr   = if (data.has("heart_rate") && !data.isNull("heart_rate"))
-                    data.getDouble("heart_rate").toInt() else null
-                val spo2 = if (data.has("spo2") && !data.isNull("spo2"))
-                    data.getDouble("spo2") else null
-                val temp = if (data.has("body_temp") && !data.isNull("body_temp"))
-                    data.getDouble("body_temp") else null
-
-                val payload = HealthServicesPayload(
-                    measuredAt = "",
-                    heartRate = hr,
-                    spo2 = spo2,
-                    bodyTemp = temp,
-                    steps = null,
-                    calories = null,
-                    bloodPressureSystolic = null,
-                    bloodPressureDiastolic = null,
+    // /hike/control: 워치가 시작한 산행 제어(pause/resume/abort/sos_cancel)를 모바일에 알린다.
+    // SOS 요청과 마찬가지로 유실되면 안 되므로 (휘발성 메시지가 아닌) DataItem으로 발행한다.
+    private fun notifyHikeControl(action: String) {
+        scope.launch {
+            try {
+                val payload = buildHikeControlPayload(
+                    action = action,
+                    id = java.util.UUID.randomUUID().toString(),
                 )
-                val message = detectAnomalyLocally(payload) ?: return@runCatching
-
-                println("[Health] 이상징후 감지: $message (HR=$hr, SpO2=$spo2, Temp=$temp)")
-                mainHandler.post { handleAnomalyDetected(message, null) }
-            }.onFailure {
-                // 네트워크 실패는 조용히 무시 (폴러가 계속 실행되도록)
+                val req = payload.toPutDataMapRequest("/hike/control")
+                    .asPutDataRequest()
+                    .setUrgent()
+                Wearable.getDataClient(this@ComposeMainActivity).putDataItem(req).await()
+            } catch (e: Exception) {
+                e.printStackTrace()
             }
-        }
-    }
-
-    private fun syncHikingStateFromServer() {
-        val baseUrl = BuildConfig.HEALTH_API_BASE_URL.trim().trimEnd('/')
-        val userId = currentUserId().toLongOrNull() ?: return
-        if (baseUrl.isBlank()) return
-        val token = currentToken()
-
-        scope.launch(Dispatchers.IO) {
-            runCatching {
-                val connection = URL("$baseUrl/data/hiking_records/filter?select=*&limit=20")
-                    .openConnection() as HttpURLConnection
-                connection.requestMethod = "POST"
-                connection.connectTimeout = 5_000
-                connection.readTimeout = 5_000
-                connection.doOutput = true
-                connection.setRequestProperty("Content-Type", "application/json; charset=utf-8")
-                connection.setRequestProperty("Accept", "application/json")
-                if (token.isNotBlank()) connection.setRequestProperty("Authorization", "Bearer $token")
-                connection.outputStream.use { it.write("""{"user_id":$userId}""".toByteArray(Charsets.UTF_8)) }
-                val code = connection.responseCode
-                if (code !in 200..299) { connection.disconnect(); return@runCatching }
-                val text = connection.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }
-                connection.disconnect()
-
-                val records = parseHikingRecords(text) ?: return@runCatching
-                // 진행 중(active/paused/anomaly) 레코드 중 가장 최근 1건
-                val ongoing = records
-                    .filter {
-                        val s = it.optString("status")
-                        s == "active" || s == "paused" || s == "anomaly"
-                    }
-                    .maxByOrNull { it.optString("started_at", "") }
-
-                // ETA/거리는 센서 시작 여부와 무관하게 항상 갱신 (모바일이 PUT한 값 반영)
-                val etaMin = ongoing?.optDouble("duration_minutes", Double.NaN) ?: Double.NaN
-                val remainKm = ongoing?.optDouble("distance_km", Double.NaN) ?: Double.NaN
-
-                mainHandler.post {
-                    if (ongoing != null) {
-                        val recordId = ongoing.optLong("id").takeIf { it > 0 }
-                        if (recordId != null) {
-                            activeHikingRecordId = recordId
-                            syncedHikingRecordId = recordId
-                        }
-                        // 모바일이 보낸 잔여 ETA/거리를 대시보드에 반영 (권한/센서 없이도 표시)
-                        if (!etaMin.isNaN() && etaMin >= 0) {
-                            totalHikingMinutes = etaMin.toInt()
-                            hikingStartedAtMs = System.currentTimeMillis()
-                            mainViewModel.updateEta("${etaMin.toLong()}분")
-                        }
-                        if (!remainKm.isNaN() && remainKm >= 0) {
-                            totalHikingDistanceKm = remainKm
-                            mainViewModel.updateDistance(String.format("%.2f", remainKm) + "km")
-                        }
-                        println("[Relay] ETA/거리 동기화: eta=${etaMin}분, dist=${remainKm}km (record=$recordId)")
-                        when (ongoing.optString("status")) {
-                            "active" -> {
-                                if (!mainViewModel.isHikingActive) {
-                                    // 모바일에서 산행 시작 → 워치 자동 반영
-                                    startHikingFromWatch()
-                                } else if (mainViewModel.isPaused) {
-                                    // 모바일에서 재개됨
-                                    applyResumeLocal()
-                                }
-                            }
-                            "paused" -> {
-                                if (mainViewModel.isHikingActive && !mainViewModel.isPaused) {
-                                    // 모바일에서 일시정지됨
-                                    applyPauseLocal()
-                                }
-                            }
-                            "anomaly" -> {
-                                // 모바일에서 이상징후 감지 → 워치에 알림 표시
-                                if (!mainViewModel.isAnomalyDetected) {
-                                    isMobileAnomalyAlert = true
-                                    mainViewModel.isMobileAnomalySource = true
-                                    // 모바일 연동 알림은 쿨다운 무시 (모바일이 이미 독립적으로 관리)
-                                    anomalyCooldownUntilMs = 0L
-                                    handleAnomalyDetected(
-                                        "⚠️ 이상징후 감지됨\n괜찮으시면 취소를 눌러주세요",
-                                        null
-                                    )
-                                }
-                            }
-                        }
-                    } else {
-                        // 진행 중 레코드 없음: 따라가던 산행이 종료(중단/완료)된 것으로 보고 워치도 종료
-                        if (syncedHikingRecordId != null && mainViewModel.isHikingActive) {
-                            stopHikingFromWatch()
-                        }
-                        syncedHikingRecordId = null
-                        activeHikingRecordId = null
-                    }
-                }
-            }.onFailure { /* 네트워크 실패 시 무시 */ }
         }
     }
 
@@ -756,7 +660,6 @@ class ComposeMainActivity : ComponentActivity(), DataClient.OnDataChangedListene
                     mainHandler.removeCallbacks(periodicHealthSendRunnable)
                     mainHandler.postDelayed(periodicHealthSendRunnable, HEALTH_SEND_INTERVAL_MS)
                     requestSamsungSpo2IfDue(force = true)
-                    fetchHikingStatusAndStartCountdown()
                 }
                 .onFailure {
                     mainViewModel.updateHikingActive(false)
@@ -770,12 +673,8 @@ class ComposeMainActivity : ComponentActivity(), DataClient.OnDataChangedListene
         mainHandler.removeCallbacks(periodicHealthSendRunnable)
         mainHandler.removeCallbacks(fakeSpo2Runnable)
         mainHandler.removeCallbacks(anomalyCountdownRunnable)
-        mainHandler.removeCallbacks(hikingStatusRunnable)
         mainViewModel.resetAnomaly()
         anomalyCooldownUntilMs = 0L
-        hikingStartedAtMs = 0L
-        totalHikingMinutes = 0
-        totalHikingDistanceKm = 0.0
         mainViewModel.updateEta("-")
         mainViewModel.updateDistance("-")
         samsungSpo2Provider?.stop()
@@ -966,45 +865,34 @@ class ComposeMainActivity : ComponentActivity(), DataClient.OnDataChangedListene
         )
     }
 
+    // 건강 샘플을 폰에 있는 모든 노드로 전송한다 (fire-and-forget: 표본 하나 유실은 허용).
+    // 백엔드로의 직접 전송은 더 이상 워치 책임이 아니다 — 폰이 게이트웨이 역할을 한다.
     private fun sendCollectedPayload() {
-        if (isSending) {
-            return
-        }
-
         val payloadForSend = stablePayloadForSend()
         if (!payloadForSend.hasCollectedRequiredValues()) {
             return
         }
 
-        val userId = currentUserId().toLongOrNull()
-        if (userId == null || userId <= 0L) {
-            return
-        }
-
-        val baseUrl = BuildConfig.HEALTH_API_BASE_URL.trim().trimEnd('/')
-        if (baseUrl.isBlank()) {
-            return
-        }
-
         currentPayload = payloadForSend
-        val requestBody = payloadForSend.toRequestBody(userId)
-        val token = currentToken()
-        isSending = true
+        val payload = buildHealthLivePayload(
+            hr = payloadForSend.heartRate ?: 0,
+            spo2 = payloadForSend.spo2 ?: 0.0,
+            temp = payloadForSend.bodyTemp ?: DEFAULT_BODY_TEMP,
+            steps = payloadForSend.steps ?: 0,
+        )
 
-        Thread {
-            val responseBody = runCatching {
-                postHealthDataWithResponse(baseUrl, token, requestBody)
-            }.getOrNull()
-
-            mainHandler.post {
-                isSending = false
-                // 백엔드 응답의 is_anomaly 기반 감지 (토큰 유효 시).
-                // 로컬 폴백 감지는 runLocalAnomalyCheck()가 게이트 없이 매 주기 수행한다.
-                if (!mainViewModel.isAnomalyDetected && responseBody != null) {
-                    handleHealthDataResponse(responseBody, payloadForSend)
+        scope.launch {
+            try {
+                val nodes = Wearable.getNodeClient(this@ComposeMainActivity).connectedNodes.await()
+                nodes.forEach { node ->
+                    Wearable.getMessageClient(this@ComposeMainActivity)
+                        .sendMessage(node.id, "/health/live", payload)
+                        .await()
                 }
+            } catch (e: Exception) {
+                e.printStackTrace()
             }
-        }.start()
+        }
     }
 
     private fun stablePayloadForSend(): HealthServicesPayload {
@@ -1030,56 +918,54 @@ class ComposeMainActivity : ComponentActivity(), DataClient.OnDataChangedListene
         return (steps * CALORIES_PER_STEP).roundToOneDecimal()
     }
 
-    private fun postHealthDataWithResponse(baseUrl: String, token: String, body: String): String {
-        val connection = URL("$baseUrl/health/data").openConnection() as HttpURLConnection
-        try {
-            connection.requestMethod = "POST"
-            connection.connectTimeout = 15_000
-            connection.readTimeout = 15_000
-            connection.doOutput = true
-            connection.setRequestProperty("Accept", "application/json")
-            connection.setRequestProperty("Content-Type", "application/json; charset=utf-8")
-            if (token.isNotBlank()) {
-                connection.setRequestProperty("Authorization", "Bearer $token")
-            }
-            connection.outputStream.use { output ->
-                output.write(body.toByteArray(Charsets.UTF_8))
-            }
-            val code = connection.responseCode
-            val stream = if (code in 200..299) connection.inputStream else connection.errorStream
-            return stream?.bufferedReader(Charsets.UTF_8)?.use { it.readText() }.orEmpty()
-        } finally {
-            connection.disconnect()
-        }
-    }
-
-    // 백엔드 /health/data 응답 파싱 → 이상 감지 시 구조 프로토콜 트리거
-    private fun handleHealthDataResponse(responseBody: String, payload: HealthServicesPayload) {
-        val (isAnomaly, sosRequestId) = parseHealthDataResponse(responseBody)
-        if (isAnomaly) {
-            val message = detectAnomalyLocally(payload) ?: "생체 이상 징후 감지"
-            handleAnomalyDetected(message, sosRequestId)
-        }
-    }
-
     // 전송 게이트와 무관하게 현재 수집된 생체값으로 이상징후를 점검한다.
-    // 감지되면 자동으로 구조 프로토콜(30초 카운트다운 → /api/emergency)을 트리거한다.
+    // 감지되면 (a) 기존 온워치 UI(진동+카운트다운)를 그대로 띄우고,
+    // (b) 워치가 이상징후 감지의 단일 원천이므로 /anomaly DataItem을 폰에 발행한다.
     private fun runLocalAnomalyCheck() {
         if (mainViewModel.isAnomalyDetected) return
         if (System.currentTimeMillis() < anomalyCooldownUntilMs) return
         val message = detectAnomalyLocally(currentPayload) ?: return
-        handleAnomalyDetected(message, null)
+        if (handleAnomalyDetected(message, null)) {
+            publishAnomalyDataItem(message)
+        }
     }
 
-    private fun handleAnomalyDetected(message: String, sosRequestId: Int?) {
-        if (mainViewModel.isAnomalyDetected) return
+    // 이상징후 메시지 → /anomaly payload용 대략적인 타입 태그로 분류
+    private fun anomalyTypeFor(message: String): String = when {
+        message.contains("심박수 과부하") -> "hr_high"
+        message.contains("심박수 이상 저하") -> "hr_low"
+        message.contains("산소포화도") -> "spo2_low"
+        message.contains("고열") -> "temp_high"
+        message.contains("저체온") -> "temp_low"
+        else -> "unknown"
+    }
+
+    // /anomaly DataItem 발행 (urgent). 유실보다 지연이 나으므로 DataClient 사용.
+    private fun publishAnomalyDataItem(message: String) {
+        scope.launch {
+            try {
+                val req = buildAnomalyPayload(anomalyTypeFor(message), message)
+                    .toPutDataMapRequest("/anomaly")
+                    .asPutDataRequest()
+                    .setUrgent()
+                Wearable.getDataClient(this@ComposeMainActivity).putDataItem(req).await()
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+        }
+    }
+
+    // 이상징후를 트리거한다. 이미 감지 중이거나 쿨다운 중이면 아무 것도 하지 않고 false 반환.
+    // 반환값으로 "실제로 새로 트리거됐는지"를 호출부(예: /anomaly 발행)가 판단할 수 있게 한다.
+    private fun handleAnomalyDetected(message: String, sosRequestId: Int?): Boolean {
+        if (mainViewModel.isAnomalyDetected) return false
         // 직전 신고/취소 직후 동일 이상값으로 즉시 재트리거 방지
-        // (모바일 연동 이상징후는 isMobileAnomalyAlert 분기에서 쿨다운을 이미 0으로 리셋)
-        if (System.currentTimeMillis() < anomalyCooldownUntilMs) return
+        if (System.currentTimeMillis() < anomalyCooldownUntilMs) return false
         mainViewModel.triggerAnomaly(message, sosRequestId)
         startAnomalyCountdown()
         // 진동으로 사용자 주의 환기 (화면을 보고 있지 않아도 감지 가능)
         vibrateAlert()
+        return true
     }
 
     private fun startAnomalyCountdown() {
@@ -1112,20 +998,21 @@ class ComposeMainActivity : ComponentActivity(), DataClient.OnDataChangedListene
         }
     }
 
-    // 사용자가 "신고" 버튼 → AlertScreen에 전송 상태 표시하며 구조 신고
+    // 사용자가 "신고" 버튼 → AlertScreen에 전송 상태 표시하며 구조 신고.
+    // 폰이 게이트웨이라는 원칙에 맞춰 /sos/request도 함께 발행한다(F3): postEmergency는 폰이
+    // 죽어 있을 때를 위한 병렬 폴백이고, /sos/request는 폰의 오프라인 큐를 태운다. 두 전송에
+    // 같은 requestId를 실어 보내 폰이 같은 사건을 두 번(오프라인 큐 + HTTP) 접수하지 않게 한다.
     private fun confirmAnomalyEmergency() {
         if (mainViewModel.emergencySendState == "sending") return // 중복 탭 방지
         mainHandler.removeCallbacks(anomalyCountdownRunnable)
         val message = mainViewModel.anomalyMessage
-
-        if (isMobileAnomalyAlert) {
-            isMobileAnomalyAlert = false
-            putHikingStatus("active") // 모바일 중복 신고 방지
-        }
+        val requestId = java.util.UUID.randomUUID().toString()
 
         // 즉시 "전송 중" 표시 (resetAnomaly 호출 안 함 → AlertScreen 유지)
         mainViewModel.emergencySendState = "sending"
         anomalyCooldownUntilMs = System.currentTimeMillis() + ANOMALY_COOLDOWN_MS
+
+        notifySosTriggered(id = requestId, source = "watch_anomaly_confirm")
 
         val baseUrl = BuildConfig.HEALTH_API_BASE_URL.trim().trimEnd('/')
         val token = currentToken()
@@ -1146,7 +1033,7 @@ class ComposeMainActivity : ComponentActivity(), DataClient.OnDataChangedListene
             } catch (_: Exception) {}
 
             val body = runCatching {
-                buildEmergencyBody("이상_징후", lat, lng, "user_confirm", message)
+                buildEmergencyBody("이상_징후", lat, lng, "user_confirm", message, requestId)
             }.getOrElse {
                 println("[SOS] buildEmergencyBody 실패: ${it.message}")
                 mainViewModel.emergencySendState = "failed"
@@ -1164,34 +1051,33 @@ class ComposeMainActivity : ComponentActivity(), DataClient.OnDataChangedListene
         }
     }
 
-    // 사용자가 "취소(괜찮아요)" 버튼 → 신고하지 않고 종료
-    // 모바일 연동 이상징후인 경우: PUT "active" → 모바일이 감지해 긴급신고 취소
+    // 사용자가 "취소(괜찮아요)" 버튼 → 신고하지 않고 종료.
+    // 이상징후 출처(워치 자체 감지 / 모바일 연동)와 무관하게 항상 notifyHikeControl("sos_cancel")을
+    // 발행한다 — 모바일은 자체 30초 타이머로 독립적으로 신고를 준비 중일 수 있으므로, 취소를
+    // 알리지 않으면 워치에서는 "괜찮다"고 끝났는데 25초 뒤 모바일이 구조대를 부르게 된다.
     private fun cancelAnomaly() {
         mainHandler.removeCallbacks(anomalyCountdownRunnable)
         mainViewModel.resetAnomaly()
         // 취소 직후 동일 이상값으로 즉시 재알림되지 않도록 일정 시간 억제
         anomalyCooldownUntilMs = System.currentTimeMillis() + ANOMALY_COOLDOWN_MS
-        if (isMobileAnomalyAlert) {
-            isMobileAnomalyAlert = false
-            // 모바일 폴러가 "active"를 감지 → dismissAnomaly() → 긴급신고 취소
-            putHikingStatus("active")
-        }
+        // 모바일이 sos_cancel을 수신 → dismissAnomaly() → 자체 타이머/긴급신고 취소
+        notifyHikeControl("sos_cancel")
     }
 
     // 카운트다운 0 → 자동 구조 프로토콜 실행
-    // 모바일 연동 이상징후인 경우: 플래그만 초기화 (모바일 30초도 만료→동시 신고 허용)
     private fun autoSendEmergencyFromAnomaly() {
         val message = mainViewModel.anomalyMessage
         mainViewModel.resetAnomaly()
-        if (isMobileAnomalyAlert) {
-            isMobileAnomalyAlert = false
-        }
         sendEmergencyForAnomaly(message, "auto_timeout")
     }
 
-    // /api/emergency 직접 POST (30초 자동 타임아웃 / auto_timeout)
+    // 자동 타임아웃(30초) 이상징후 신고. /sos/request(폰 오프라인 큐)와 postEmergency(HTTP
+    // 폴백)를 같은 requestId로 병렬 발행한다 — 이유는 confirmAnomalyEmergency()와 동일(F3).
     private fun sendEmergencyForAnomaly(reason: String, triggeredBy: String) {
         anomalyCooldownUntilMs = System.currentTimeMillis() + ANOMALY_COOLDOWN_MS
+        val requestId = java.util.UUID.randomUUID().toString()
+        notifySosTriggered(id = requestId, source = "watch_anomaly_auto")
+
         val baseUrl = BuildConfig.HEALTH_API_BASE_URL.trim().trimEnd('/')
         val token = currentToken()
         if (baseUrl.isBlank()) return
@@ -1207,7 +1093,7 @@ class ComposeMainActivity : ComponentActivity(), DataClient.OnDataChangedListene
             } catch (_: Exception) {}
 
             val body = runCatching {
-                buildEmergencyBody("이상_징후", lat, lng, triggeredBy, reason)
+                buildEmergencyBody("이상_징후", lat, lng, triggeredBy, reason, requestId)
             }.getOrElse {
                 println("[SOS] sendEmergencyForAnomaly 실패: ${it.message}")
                 return@launch
@@ -1220,15 +1106,6 @@ class ComposeMainActivity : ComponentActivity(), DataClient.OnDataChangedListene
         }
     }
 
-    private fun refreshEtaFromElapsed() {
-        if (totalHikingMinutes > 0 && hikingStartedAtMs > 0) {
-            val elapsedMinutes = (System.currentTimeMillis() - hikingStartedAtMs) / 60_000L
-            val remaining = (totalHikingMinutes - elapsedMinutes).coerceAtLeast(0L)
-            mainViewModel.updateEta("${remaining}분")
-        }
-    }
-
-    // 모바일 내비게이션의 실시간 남은 ETA/거리를 Flask 중계 서버에서 조회합니다.
     // 네트워크 호출에 사용할 유효 토큰: 런타임(모바일 수신) 우선, 없으면 빌드 시 주입된 토큰
     private fun currentToken(): String {
         val rt = runtimeToken?.trim()
@@ -1289,161 +1166,6 @@ class ComposeMainActivity : ComponentActivity(), DataClient.OnDataChangedListene
             .apply()
     }
 
-    // Flask relay에서 모바일이 push한 최신 user_id+JWT를 받아 런타임/영구 저장에 반영
-    private fun fetchWatchCredentials() {
-        val trailUrl = BuildConfig.TRAIL_API_BASE_URL.trim().trimEnd('/')
-        if (trailUrl.isBlank()) return
-
-        scope.launch(Dispatchers.IO) {
-            runCatching {
-                val connection = URL("$trailUrl/api/watch-credentials/latest")
-                    .openConnection() as HttpURLConnection
-                connection.requestMethod = "GET"
-                connection.connectTimeout = 5_000
-                connection.readTimeout = 5_000
-                connection.setRequestProperty("Accept", "application/json")
-                val code = connection.responseCode
-                if (code !in 200..299) { connection.disconnect(); return@runCatching }
-                val text = connection.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }
-                connection.disconnect()
-
-                val obj = JSONObject(text)
-                val token = obj.optString("token", "")
-                val userId = if (obj.isNull("user_id")) "" else obj.opt("user_id").toString()
-                val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-                if (token.isNotBlank() && token != runtimeToken) {
-                    runtimeToken = token
-                    prefs.edit().putString(PREF_KEY_TOKEN, token).apply()
-                    println("[CRED] 모바일 토큰 수신·갱신 (…${token.takeLast(6)})")
-                }
-                if (userId.isNotBlank() && userId != "null" && userId != runtimeUserId) {
-                    runtimeUserId = userId
-                    prefs.edit().putString(PREF_KEY_USER_ID, userId).apply()
-                    println("[CRED] 모바일 user_id 수신·갱신 ($userId)")
-                }
-            }.onFailure { /* Flask 미실행 시 무시, 기존 자격증명 유지 */ }
-        }
-    }
-
-    // 배포된 Railway에서 모바일이 갱신한 active hiking_record의 '잔여 ETA/거리'를 읽어 워치에 반영.
-    // (모바일 LiveMapScreen이 updateHikingProgress로 duration_minutes=잔여분, distance_km=잔여km를 10초마다 갱신)
-    private fun fetchRelayStatus() {
-        val baseUrl = BuildConfig.HEALTH_API_BASE_URL.trim().trimEnd('/')
-        val token = currentToken()
-        val userId = currentUserId().toLongOrNull() ?: return
-        if (baseUrl.isBlank()) return
-
-        scope.launch(Dispatchers.IO) {
-            runCatching {
-                val connection = URL("$baseUrl/data/hiking_records/filter?select=*&limit=20")
-                    .openConnection() as HttpURLConnection
-                connection.requestMethod = "POST"
-                connection.connectTimeout = 5_000
-                connection.readTimeout = 5_000
-                connection.doOutput = true
-                connection.setRequestProperty("Content-Type", "application/json; charset=utf-8")
-                connection.setRequestProperty("Accept", "application/json")
-                if (token.isNotBlank()) connection.setRequestProperty("Authorization", "Bearer $token")
-                connection.outputStream.use { it.write("""{"user_id":$userId}""".toByteArray(Charsets.UTF_8)) }
-                val code = connection.responseCode
-                if (code !in 200..299) { connection.disconnect(); return@runCatching }
-                val text = connection.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }
-                connection.disconnect()
-
-                val records = parseHikingRecords(text) ?: return@runCatching
-                // active 중 가장 최근 started_at 1건 선택
-                val active = records.filter { it.optString("status") == "active" }
-                    .maxByOrNull { it.optString("started_at", "") } ?: return@runCatching
-
-                // 상태 PUT 대상 레코드 id 캡처
-                active.optLong("id").takeIf { it > 0 }?.let { activeHikingRecordId = it }
-
-                val etaMin = active.optDouble("duration_minutes", Double.NaN)
-                val remainKm = active.optDouble("distance_km", Double.NaN)
-
-                println("[Relay] ETA/거리 수신: eta=${etaMin}분, dist=${remainKm}km (record=${activeHikingRecordId})")
-                mainHandler.post {
-                    if (!etaMin.isNaN() && etaMin >= 0) {
-                        // 모바일 알고리즘의 '남은 시간'을 새 카운트다운 기준점으로 재설정
-                        totalHikingMinutes = etaMin.toInt()
-                        hikingStartedAtMs = System.currentTimeMillis()
-                        mainViewModel.updateEta("${etaMin.toLong()}분")
-                    }
-                    if (!remainKm.isNaN() && remainKm >= 0) {
-                        totalHikingDistanceKm = remainKm
-                        mainViewModel.updateDistance(String.format("%.2f", remainKm) + "km")
-                    }
-                }
-            }.onFailure { /* 네트워크 실패 시 무시, 로컬 카운트다운 유지 */ }
-        }
-    }
-
-    // /data/hiking_records[/filter] 응답(배열 또는 {data|rows:[...]})을 JSONObject 리스트로 파싱
-    private fun parseHikingRecords(text: String): List<JSONObject>? {
-        return try {
-            val arr = JSONArray(text)
-            (0 until arr.length()).map { arr.getJSONObject(it) }
-        } catch (_: Exception) {
-            try {
-                val obj = JSONObject(text)
-                val arr = obj.optJSONArray("data") ?: obj.optJSONArray("rows") ?: return null
-                (0 until arr.length()).map { arr.getJSONObject(it) }
-            } catch (_: Exception) { null }
-        }
-    }
-
-    private fun fetchHikingStatusAndStartCountdown() {
-        val baseUrl = BuildConfig.HEALTH_API_BASE_URL.trim().trimEnd('/')
-        val token = currentToken()
-        val userId = currentUserId().toLongOrNull() ?: return
-        if (baseUrl.isBlank()) return
-
-        scope.launch(Dispatchers.IO) {
-            runCatching {
-                val connection = URL("$baseUrl/data/hiking_records/filter?select=*&limit=20")
-                    .openConnection() as HttpURLConnection
-                connection.requestMethod = "POST"
-                connection.connectTimeout = 10_000
-                connection.readTimeout = 10_000
-                connection.doOutput = true
-                connection.setRequestProperty("Content-Type", "application/json; charset=utf-8")
-                connection.setRequestProperty("Accept", "application/json")
-                if (token.isNotBlank()) connection.setRequestProperty("Authorization", "Bearer $token")
-                connection.outputStream.use { it.write("""{"user_id":$userId}""".toByteArray(Charsets.UTF_8)) }
-                val code = connection.responseCode
-                if (code !in 200..299) { connection.disconnect(); return@runCatching }
-                val text = connection.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }
-                connection.disconnect()
-
-                val records = parseHikingRecords(text) ?: return@runCatching
-                val active = records.filter { it.optString("status") == "active" }
-                    .maxByOrNull { it.optString("started_at", "") }
-                    ?: return@runCatching
-
-                val distanceKm = active.optDouble("distance_km", 0.0)
-                val durationMin = active.optInt("duration_minutes", 0)
-                val startedAt = active.optString("started_at", "")
-
-                mainHandler.post {
-                    if (distanceKm > 0) {
-                        totalHikingDistanceKm = distanceKm
-                        mainViewModel.updateDistance(String.format("%.1f", distanceKm) + "km")
-                    }
-                    if (durationMin > 0) totalHikingMinutes = durationMin
-                    if (startedAt.isNotEmpty()) {
-                        hikingStartedAtMs = try {
-                            java.time.Instant.parse(startedAt).toEpochMilli()
-                        } catch (_: Exception) { System.currentTimeMillis() }
-                    }
-                    refreshEtaFromElapsed()
-                    fetchRelayStatus() // 모바일 실시간 값으로 즉시 덮어씌우기 시도
-                    mainHandler.removeCallbacks(hikingStatusRunnable)
-                    mainHandler.postDelayed(hikingStatusRunnable, HIKING_STATUS_INTERVAL_MS)
-                }
-            }.onFailure { it.printStackTrace() }
-        }
-    }
-
     private fun hasRequiredPermissions(): Boolean {
         return requiredPermissions().all {
             checkSelfPermission(it) == PackageManager.PERMISSION_GRANTED
@@ -1481,8 +1203,7 @@ class ComposeMainActivity : ComponentActivity(), DataClient.OnDataChangedListene
         mainHandler.removeCallbacks(periodicHealthSendRunnable)
         mainHandler.removeCallbacks(fakeSpo2Runnable)
         mainHandler.removeCallbacks(anomalyCountdownRunnable)
-        mainHandler.removeCallbacks(hikingStatusRunnable)
-        mainHandler.removeCallbacks(credentialSyncRunnable)
+        mainHandler.removeCallbacks(nodeCountPollRunnable)
         exerciseClient.clearUpdateCallbackAsync(exerciseUpdateCallback)
         scope.cancel()
         super.onDestroy()
@@ -1498,10 +1219,7 @@ class ComposeMainActivity : ComponentActivity(), DataClient.OnDataChangedListene
         private const val PERMISSION_READ_OXYGEN_SATURATION =
             "android.permission.health.READ_OXYGEN_SATURATION"
         private const val HEALTH_SEND_INTERVAL_MS = 3_000L
-        private const val HIKING_STATUS_INTERVAL_MS = 10_000L
-        private const val CREDENTIAL_SYNC_INTERVAL_MS = 15_000L
-        private const val MOBILE_SYNC_INTERVAL_MS = 7_000L
-        private const val HEALTH_ANOMALY_POLL_INTERVAL_MS = 10_000L
+        private const val NODE_COUNT_POLL_INTERVAL_MS = 5_000L
         private const val PREFS_NAME = "sanhaengii_watch_prefs"
         private const val PREF_KEY_TOKEN = "health_api_token"
         private const val PREF_KEY_USER_ID = "health_api_user_id"

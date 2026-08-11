@@ -25,12 +25,20 @@ val healthApiUserId = localProperties.getProperty("HEALTH_API_USER_ID", "")
 // 로컬 Flask 서버 (에뮬레이터: 10.0.2.2, 실기기: 호스트 PC IP)
 val trailApiBaseUrl = localProperties.getProperty("TRAIL_API_BASE_URL", "http://10.0.2.2:5001")
 
+// 릴리스 서명 설정 (keystore.properties 에서 로드, 깃에 커밋 금지)
+val keystoreProperties = Properties()
+val keystorePropertiesFile = rootProject.file("keystore.properties")
+val hasReleaseSigning = keystorePropertiesFile.exists()
+if (hasReleaseSigning) {
+    keystorePropertiesFile.inputStream().use { keystoreProperties.load(it) }
+}
+
 android {
-    namespace = "com.sanhaengii.wearhealthsender"
+    namespace = "com.sanhaengii.app"
     compileSdk = 36 // 🚀 수정: 안정적인 34 버전으로 하향
 
     defaultConfig {
-        applicationId = "com.sanhaengii.wearhealthsender"
+        applicationId = "com.sanhaengii.app"
         minSdk = 30
         targetSdk = 34 // 🚀 수정
         versionCode = 1
@@ -40,6 +48,40 @@ android {
         buildConfigField("String", "HEALTH_API_TOKEN", healthApiToken.asBuildConfigString())
         buildConfigField("String", "HEALTH_API_USER_ID", healthApiUserId.asBuildConfigString())
         buildConfigField("String", "TRAIL_API_BASE_URL", trailApiBaseUrl.asBuildConfigString())
+    }
+
+    signingConfigs {
+        if (hasReleaseSigning) {
+            create("release") {
+                storeFile = rootProject.file(keystoreProperties.getProperty("storeFile"))
+                storePassword = keystoreProperties.getProperty("storePassword")
+                keyAlias = keystoreProperties.getProperty("keyAlias")
+                keyPassword = keystoreProperties.getProperty("keyPassword")
+            }
+        }
+        // 모바일(Expo) 앱과 동일한 디버그 키를 사용 (Data Layer는 서명이 다르면 조용히 실패함)
+        create("sharedDebug") {
+            storeFile = file(System.getProperty("user.home") + "/sanhaengii-shared-debug.keystore")
+            storePassword = "android"
+            keyAlias = "androiddebugkey"
+            keyPassword = "android"
+        }
+    }
+
+    buildTypes {
+        getByName("release") {
+            if (hasReleaseSigning) {
+                signingConfig = signingConfigs.getByName("release")
+            }
+            isMinifyEnabled = false
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro"
+            )
+        }
+        getByName("debug") {
+            signingConfig = signingConfigs.getByName("sharedDebug")
+        }
     }
 
     buildFeatures {

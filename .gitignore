@@ -38,3 +38,5 @@ local.properties
 
 # 안드로이드 메모리 덤프 파일 무시
 *.hprof
+# 서명 키스토어 비밀번호 (커밋 금지)
+keystore.properties
