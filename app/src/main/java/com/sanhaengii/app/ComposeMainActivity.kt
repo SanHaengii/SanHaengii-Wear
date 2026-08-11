@@ -75,12 +75,6 @@ class ComposeMainActivity : ComponentActivity(), DataClient.OnDataChangedListene
     @Volatile private var runtimeUserId: String? = null
     // 이상징후 자동 구조 요청 후/취소 후 재트리거 억제 시각 (스팸 방지)
     private var anomalyCooldownUntilMs = 0L
-    // 현재 워치가 따라가고 있는(동기화 중인) 산행 레코드 id. /hike/state payload에 레코드 id가
-    // 없어 Data Layer 전환 이후 채워지지 않지만, abortHikingFromWatch()가 여전히 초기화한다.
-    @Volatile private var syncedHikingRecordId: Long? = null
-    // 모바일 앱에서 이상징후를 감지해 "anomaly" 신호를 보낸 경우 true
-    // (취소 시 notifyHikeControl("sos_cancel")로 응답해야 함)
-    @Volatile private var isMobileAnomalyAlert = false
     private var nextFakeSpo2 = 100
     private var lastSpo2: Double? = null
     private var lastHeartRate: Int? = null
@@ -156,6 +150,7 @@ class ComposeMainActivity : ComponentActivity(), DataClient.OnDataChangedListene
     }
 
     private fun pollConnectedNodeCount() {
+        if (!::mainViewModel.isInitialized) return
         scope.launch {
             try {
                 val nodes = Wearable.getNodeClient(this@ComposeMainActivity).connectedNodes.await()
@@ -206,7 +201,6 @@ class ComposeMainActivity : ComponentActivity(), DataClient.OnDataChangedListene
                         message = mainViewModel.anomalyMessage,
                         isWarning = true,
                         countdown = if (isSending) null else mainViewModel.anomalyCountdown,
-                        cancelLabel = if (mainViewModel.isMobileAnomalySource) "괜찮아요" else "취소",
                         emergencySendState = mainViewModel.emergencySendState,
                         // 전송 중엔 버튼 비활성 (중복 탭 방지)
                         onConfirm = if (isSending) null else {{ confirmAnomalyEmergency() }},
@@ -246,6 +240,11 @@ class ComposeMainActivity : ComponentActivity(), DataClient.OnDataChangedListene
         }
 
         Wearable.getDataClient(this).addListener(this)
+        // addListener는 등록 "이후" 변경만 전달한다 — 스토어에 이미 있던 /auth, /hike/state,
+        // /sos/ack는 재생되지 않는다. 신규 설치나 (워치 앱이 닫혀 있던 동안) 재로그인 뒤 워치
+        // 앱을 열면 이 이벤트를 영영 못 받아 토큰/유저ID가 비거나 stale해지므로, 시작 시 한 번
+        // 기존 값을 훑어 onDataChanged와 동일한 parse/apply 경로로 반영한다.
+        sweepExistingDataItems()
         mainHandler.post(nodeCountPollRunnable)
 
         // 저장된 자격증명/생체값 복원. 자격증명·산행상태·이상징후는 이제 모두
@@ -255,15 +254,44 @@ class ComposeMainActivity : ComponentActivity(), DataClient.OnDataChangedListene
         loadSavedSpo2()
     }
 
+    // 리스너 등록 전부터 스토어에 있던 DataItem을 한 번 훑어 반영한다.
+    // 실패해도 앱을 죽이면 안 되므로 전체를 방어적으로 감싼다.
+    private fun sweepExistingDataItems() {
+        scope.launch {
+            try {
+                val dataItems = Wearable.getDataClient(this@ComposeMainActivity).dataItems.await()
+                try {
+                    for (item in dataItems) {
+                        val map = DataMapItem.fromDataItem(item).dataMap.toPlainMap()
+                        when (item.uri.path) {
+                            "/auth" -> applyAuthPayload(parseAuthPayload(map))
+                            "/hike/state" -> applyHikeStatePayload(parseHikeStatePayload(map))
+                            "/sos/ack" -> applySosAckPayload(parseSosAckPayload(map))
+                        }
+                    }
+                } finally {
+                    dataItems.release()
+                }
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+        }
+    }
+
     // SOS는 유실되면 안 되므로 (휘발성 메시지가 아닌) DataItem으로 발행한다.
     // 워치에 최근 GPS 고정값이 캐시돼 있지 않으므로 좌표는 null로 보낸다 —
     // 0.0 같은 가짜 좌표를 지어내면 구조대가 엉뚱한 곳으로 갈 수 있다.
-    private fun notifySosTriggered() {
+    // id/source는 호출측이 지정할 수 있다 — 이상징후 경로(F3)가 동일 id를 postEmergency의
+    // HTTP body에도 실어 보내, 폰이 같은 사건을 두 번(오프라인 큐 + HTTP) 접수하지 않게 한다.
+    private fun notifySosTriggered(
+        id: String = java.util.UUID.randomUUID().toString(),
+        source: String = "watch_sos",
+    ) {
         scope.launch {
             try {
                 val payload = buildSosRequestPayload(
-                    id = java.util.UUID.randomUUID().toString(),
-                    source = "watch_sos",
+                    id = id,
+                    source = source,
                     lat = null,
                     lng = null,
                 )
@@ -370,7 +398,10 @@ class ComposeMainActivity : ComponentActivity(), DataClient.OnDataChangedListene
      * 백엔드 /api/emergency 필수 필드를 항상 포함하는 JSON body 생성.
      *  - userId : 필수. 비어있으면 null이 아니라 예외를 던져 호출부에서 "failed" 처리.
      *  - eventType, location, timestamp : 항상 포함.
-     *  - 추가 필드(triggeredBy, reason)는 옵션.
+     *  - 추가 필드(triggeredBy, reason, requestId)는 옵션.
+     *  - requestId : 같은 사건으로 발행한 /sos/request DataItem의 id와 동일한 값을 실어 보내면,
+     *    폰이 두 전송 경로(Data Layer 오프라인 큐 + 이 HTTP 직접 호출)를 같은 사건으로 식별해
+     *    중복 접수를 피할 수 있다.
      */
     private fun buildEmergencyBody(
         eventType: String,
@@ -378,10 +409,11 @@ class ComposeMainActivity : ComponentActivity(), DataClient.OnDataChangedListene
         lng: Double,
         triggeredBy: String? = null,
         reason: String? = null,
+        requestId: String? = null,
     ): String {
         val userIdVal = currentUserId().trim()
         check(userIdVal.isNotBlank()) {
-            "userId가 비어있습니다. npm run sync-watch 실행 후 워치 앱을 재빌드하세요."
+            "userId가 비어있습니다. 모바일 앱에 로그인한 뒤 워치 앱을 다시 열어 /auth를 재수신하세요."
         }
         val timestamp = java.time.Instant.now().toString()
         return buildString {
@@ -390,6 +422,7 @@ class ComposeMainActivity : ComponentActivity(), DataClient.OnDataChangedListene
             append("\"eventType\":\"$eventType\",")
             if (triggeredBy != null) append("\"triggered_by\":\"$triggeredBy\",")
             if (reason != null) append("\"reason\":${escapeJson(reason)},")
+            if (requestId != null) append("\"requestId\":${escapeJson(requestId)},")
             append("\"location\":{\"lat\":$lat,\"lng\":$lng},")
             append("\"timestamp\":\"$timestamp\"")
             append("}")
@@ -447,6 +480,7 @@ class ComposeMainActivity : ComponentActivity(), DataClient.OnDataChangedListene
     }
 
     override fun onDataChanged(dataEvents: com.google.android.gms.wearable.DataEventBuffer) {
+        if (!::mainViewModel.isInitialized) return
         dataEvents.forEach { event ->
             if (event.type != DataEvent.TYPE_CHANGED) return@forEach
             val map = DataMapItem.fromDataItem(event.dataItem).dataMap.toPlainMap()
@@ -491,6 +525,7 @@ class ComposeMainActivity : ComponentActivity(), DataClient.OnDataChangedListene
     // 폰이 push한 값을 직접 사용한다. "anomaly" 상태 전이는 없앴다 — 이상징후 감지는 이제
     // 워치가 직접 수행해 /anomaly로 발행하므로, 폰이 산행 상태를 통해 알릴 필요가 없다.
     private fun applyHikeStatePayload(payload: HikeStatePayload) {
+        if (!::mainViewModel.isInitialized) return
         mainViewModel.updateEta("${payload.etaMin}분")
         mainViewModel.updateDistance(String.format("%.2f", payload.remainKm) + "km")
 
@@ -511,6 +546,7 @@ class ComposeMainActivity : ComponentActivity(), DataClient.OnDataChangedListene
     // 전이시키면 안 된다. queued는 아직 최종 상태가 아니므로 sending과 함께 SOS 리포팅 진행
     // 중으로 취급한다.
     private fun applySosAckPayload(payload: SosAckPayload) {
+        if (!::mainViewModel.isInitialized) return
         val state = when (payload.state) {
             "sending", "success", "failed", "queued" -> payload.state
             else -> return
@@ -545,7 +581,8 @@ class ComposeMainActivity : ComponentActivity(), DataClient.OnDataChangedListene
         notifyHikeControl("resume")
     }
 
-    // 일시정지 로컬 적용(전송 중단). 서버 PUT은 호출측에서 결정
+    // 일시정지 로컬 적용(생체값 전송 중단). 모바일 알림은 호출측(pauseHikingFromWatch 등)이
+    // notifyHikeControl()로 처리한다 — 직접적인 백엔드 PUT 호출은 없음(폰이 게이트웨이).
     private fun applyPauseLocal() {
         mainViewModel.updatePaused(true)
         mainHandler.removeCallbacks(periodicHealthSendRunnable)
@@ -560,7 +597,6 @@ class ComposeMainActivity : ComponentActivity(), DataClient.OnDataChangedListene
     // 중단하기 = 완전 종료(기록 저장 status=completed). 양쪽 종료
     private fun abortHikingFromWatch() {
         notifyHikeControl("abort")
-        syncedHikingRecordId = null
         stopHikingFromWatch()
     }
 
@@ -924,7 +960,6 @@ class ComposeMainActivity : ComponentActivity(), DataClient.OnDataChangedListene
     private fun handleAnomalyDetected(message: String, sosRequestId: Int?): Boolean {
         if (mainViewModel.isAnomalyDetected) return false
         // 직전 신고/취소 직후 동일 이상값으로 즉시 재트리거 방지
-        // (모바일 연동 이상징후는 isMobileAnomalyAlert 분기에서 쿨다운을 이미 0으로 리셋)
         if (System.currentTimeMillis() < anomalyCooldownUntilMs) return false
         mainViewModel.triggerAnomaly(message, sosRequestId)
         startAnomalyCountdown()
@@ -963,20 +998,21 @@ class ComposeMainActivity : ComponentActivity(), DataClient.OnDataChangedListene
         }
     }
 
-    // 사용자가 "신고" 버튼 → AlertScreen에 전송 상태 표시하며 구조 신고
+    // 사용자가 "신고" 버튼 → AlertScreen에 전송 상태 표시하며 구조 신고.
+    // 폰이 게이트웨이라는 원칙에 맞춰 /sos/request도 함께 발행한다(F3): postEmergency는 폰이
+    // 죽어 있을 때를 위한 병렬 폴백이고, /sos/request는 폰의 오프라인 큐를 태운다. 두 전송에
+    // 같은 requestId를 실어 보내 폰이 같은 사건을 두 번(오프라인 큐 + HTTP) 접수하지 않게 한다.
     private fun confirmAnomalyEmergency() {
         if (mainViewModel.emergencySendState == "sending") return // 중복 탭 방지
         mainHandler.removeCallbacks(anomalyCountdownRunnable)
         val message = mainViewModel.anomalyMessage
-
-        if (isMobileAnomalyAlert) {
-            isMobileAnomalyAlert = false
-            notifyHikeControl("sos_cancel") // 모바일 중복 신고 방지
-        }
+        val requestId = java.util.UUID.randomUUID().toString()
 
         // 즉시 "전송 중" 표시 (resetAnomaly 호출 안 함 → AlertScreen 유지)
         mainViewModel.emergencySendState = "sending"
         anomalyCooldownUntilMs = System.currentTimeMillis() + ANOMALY_COOLDOWN_MS
+
+        notifySosTriggered(id = requestId, source = "watch_anomaly_confirm")
 
         val baseUrl = BuildConfig.HEALTH_API_BASE_URL.trim().trimEnd('/')
         val token = currentToken()
@@ -997,7 +1033,7 @@ class ComposeMainActivity : ComponentActivity(), DataClient.OnDataChangedListene
             } catch (_: Exception) {}
 
             val body = runCatching {
-                buildEmergencyBody("이상_징후", lat, lng, "user_confirm", message)
+                buildEmergencyBody("이상_징후", lat, lng, "user_confirm", message, requestId)
             }.getOrElse {
                 println("[SOS] buildEmergencyBody 실패: ${it.message}")
                 mainViewModel.emergencySendState = "failed"
@@ -1015,34 +1051,33 @@ class ComposeMainActivity : ComponentActivity(), DataClient.OnDataChangedListene
         }
     }
 
-    // 사용자가 "취소(괜찮아요)" 버튼 → 신고하지 않고 종료
-    // 모바일 연동 이상징후인 경우: PUT "active" → 모바일이 감지해 긴급신고 취소
+    // 사용자가 "취소(괜찮아요)" 버튼 → 신고하지 않고 종료.
+    // 이상징후 출처(워치 자체 감지 / 모바일 연동)와 무관하게 항상 notifyHikeControl("sos_cancel")을
+    // 발행한다 — 모바일은 자체 30초 타이머로 독립적으로 신고를 준비 중일 수 있으므로, 취소를
+    // 알리지 않으면 워치에서는 "괜찮다"고 끝났는데 25초 뒤 모바일이 구조대를 부르게 된다.
     private fun cancelAnomaly() {
         mainHandler.removeCallbacks(anomalyCountdownRunnable)
         mainViewModel.resetAnomaly()
         // 취소 직후 동일 이상값으로 즉시 재알림되지 않도록 일정 시간 억제
         anomalyCooldownUntilMs = System.currentTimeMillis() + ANOMALY_COOLDOWN_MS
-        if (isMobileAnomalyAlert) {
-            isMobileAnomalyAlert = false
-            // 모바일이 sos_cancel을 수신 → dismissAnomaly() → 긴급신고 취소
-            notifyHikeControl("sos_cancel")
-        }
+        // 모바일이 sos_cancel을 수신 → dismissAnomaly() → 자체 타이머/긴급신고 취소
+        notifyHikeControl("sos_cancel")
     }
 
     // 카운트다운 0 → 자동 구조 프로토콜 실행
-    // 모바일 연동 이상징후인 경우: 플래그만 초기화 (모바일 30초도 만료→동시 신고 허용)
     private fun autoSendEmergencyFromAnomaly() {
         val message = mainViewModel.anomalyMessage
         mainViewModel.resetAnomaly()
-        if (isMobileAnomalyAlert) {
-            isMobileAnomalyAlert = false
-        }
         sendEmergencyForAnomaly(message, "auto_timeout")
     }
 
-    // /api/emergency 직접 POST (30초 자동 타임아웃 / auto_timeout)
+    // 자동 타임아웃(30초) 이상징후 신고. /sos/request(폰 오프라인 큐)와 postEmergency(HTTP
+    // 폴백)를 같은 requestId로 병렬 발행한다 — 이유는 confirmAnomalyEmergency()와 동일(F3).
     private fun sendEmergencyForAnomaly(reason: String, triggeredBy: String) {
         anomalyCooldownUntilMs = System.currentTimeMillis() + ANOMALY_COOLDOWN_MS
+        val requestId = java.util.UUID.randomUUID().toString()
+        notifySosTriggered(id = requestId, source = "watch_anomaly_auto")
+
         val baseUrl = BuildConfig.HEALTH_API_BASE_URL.trim().trimEnd('/')
         val token = currentToken()
         if (baseUrl.isBlank()) return
@@ -1058,7 +1093,7 @@ class ComposeMainActivity : ComponentActivity(), DataClient.OnDataChangedListene
             } catch (_: Exception) {}
 
             val body = runCatching {
-                buildEmergencyBody("이상_징후", lat, lng, triggeredBy, reason)
+                buildEmergencyBody("이상_징후", lat, lng, triggeredBy, reason, requestId)
             }.getOrElse {
                 println("[SOS] sendEmergencyForAnomaly 실패: ${it.message}")
                 return@launch

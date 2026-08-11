@@ -19,8 +19,6 @@ class MainViewModel : ViewModel() {
     var anomalyMessage by mutableStateOf("")
     var anomalyCountdown by mutableStateOf<Int?>(null)
     var anomalySosRequestId by mutableStateOf<Int?>(null)
-    // 모바일 앱에서 감지된 이상징후 여부 (UI에서 "괜찮아요" 레이블 표시용)
-    var isMobileAnomalySource by mutableStateOf(false)
 
     // 신고 전송 진행 상태 ("idle" / "sending" / "success" / "failed")
     var emergencySendState by mutableStateOf("idle")
@@ -93,7 +91,6 @@ class MainViewModel : ViewModel() {
         anomalyMessage = ""
         anomalyCountdown = null
         anomalySosRequestId = null
-        isMobileAnomalySource = false
         emergencySendState = "idle"
     }
 }
