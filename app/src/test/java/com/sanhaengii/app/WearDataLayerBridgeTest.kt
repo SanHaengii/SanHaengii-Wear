@@ -31,4 +31,20 @@ class WearDataLayerBridgeTest {
         assertEquals(false, map.containsKey("lat"))
         assertEquals(false, map.containsKey("lng"))
     }
+
+    @Test
+    fun `산행 제어 payload는 action과 id를 그대로 담고 타임스탬프를 포함한다`() {
+        val map = buildHikeControlPayload(action = "pause", id = "req-1")
+        assertEquals("pause", map["action"])
+        assertEquals("req-1", map["id"])
+        assert((map["at"] as Long) > 0)
+    }
+
+    @Test
+    fun `산행 제어 payload의 action은 그대로 왕복한다`() {
+        for (action in listOf("pause", "resume", "abort", "sos_cancel")) {
+            val map = buildHikeControlPayload(action = action, id = "req-2")
+            assertEquals(action, map["action"])
+        }
+    }
 }

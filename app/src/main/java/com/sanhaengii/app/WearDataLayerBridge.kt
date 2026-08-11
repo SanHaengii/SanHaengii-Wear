@@ -39,6 +39,14 @@ fun buildSosRequestPayload(id: String, source: String, lat: Double?, lng: Double
     return map
 }
 
+// 워치→모바일 산행 제어 (pause/resume/abort/sos_cancel). id는 호출측이 매번 새 UUID를 넣어,
+// 동일 action이 반복돼도 이전 putDataItem과 바이트가 달라 Data Layer가 무시하지 않게 한다.
+fun buildHikeControlPayload(action: String, id: String): Map<String, Any> = mapOf(
+    "action" to action,
+    "id" to id,
+    "at" to System.currentTimeMillis(),
+)
+
 fun parseAuthPayload(map: Map<String, Any?>): AuthPayload =
     AuthPayload(
         userId = (map["userId"] as? Int) ?: 0,

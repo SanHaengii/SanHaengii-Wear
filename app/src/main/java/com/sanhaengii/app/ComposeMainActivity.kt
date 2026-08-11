@@ -75,15 +75,11 @@ class ComposeMainActivity : ComponentActivity(), DataClient.OnDataChangedListene
     @Volatile private var runtimeUserId: String? = null
     // 이상징후 자동 구조 요청 후/취소 후 재트리거 억제 시각 (스팸 방지)
     private var anomalyCooldownUntilMs = 0L
-    // 모바일이 소유한 산행 레코드 id (상태 PUT 대상).
-    // 과거엔 서버 폴링(fetchRelayStatus/syncHikingStateFromServer)이 채웠으나 두 함수 모두
-    // Data Layer 전환으로 제거됨 — /hike/state payload에 레코드 id가 없어 현재는 채워지지 않는다.
-    // putHikingStatus()는 여전히 이 값을 읽으므로 당분간 항상 no-op으로 동작한다 (아래 보고서 참고).
-    @Volatile private var activeHikingRecordId: Long? = null
-    // 현재 워치가 따라가고 있는(동기화 중인) 산행 레코드 id. 위와 같은 이유로 더 이상 채워지지 않는다.
+    // 현재 워치가 따라가고 있는(동기화 중인) 산행 레코드 id. /hike/state payload에 레코드 id가
+    // 없어 Data Layer 전환 이후 채워지지 않지만, abortHikingFromWatch()가 여전히 초기화한다.
     @Volatile private var syncedHikingRecordId: Long? = null
     // 모바일 앱에서 이상징후를 감지해 "anomaly" 신호를 보낸 경우 true
-    // (취소 시 putHikingStatus("active")로 응답해야 함)
+    // (취소 시 notifyHikeControl("sos_cancel")로 응답해야 함)
     @Volatile private var isMobileAnomalyAlert = false
     private var nextFakeSpo2 = 100
     private var lastSpo2: Double? = null
@@ -478,9 +474,17 @@ class ComposeMainActivity : ComponentActivity(), DataClient.OnDataChangedListene
     }
 
     // /sos/ack: 폰이 SOS 처리 결과를 알려오면 전송 상태 UI(AlertScreen/SosScreen)에 반영한다.
+    // 워치 어휘는 idle/sending/success/failed뿐이고 폰은 추가로 queued(모바일도 오프라인이라
+    // 로컬 대기 중)를 보낼 수 있다. 알 수 없는 값은 무시 — UI 어떤 분기도 못 받는 상태로
+    // 전이시키면 안 된다. queued는 아직 최종 상태가 아니므로 sending과 함께 SOS 리포팅 진행
+    // 중으로 취급한다.
     private fun applySosAckPayload(payload: SosAckPayload) {
-        mainViewModel.emergencySendState = payload.state
-        if (payload.state != "sending") {
+        val state = when (payload.state) {
+            "sending", "success", "failed", "queued" -> payload.state
+            else -> return
+        }
+        mainViewModel.emergencySendState = state
+        if (state != "sending" && state != "queued") {
             mainViewModel.resetSosReporting()
         }
     }
@@ -489,8 +493,8 @@ class ComposeMainActivity : ComponentActivity(), DataClient.OnDataChangedListene
     private fun toggleHikingFromWatch() {
         if (!mainViewModel.isHikingActive) {
             startHikingFromWatch()
-            // 모바일 레코드가 이미 있으면 active로 동기화(없으면 id 없어 no-op)
-            putHikingStatus("active")
+            // 모바일에 산행 활성 상태를 알림(모바일에 레코드가 없으면 모바일 쪽에서 무시)
+            notifyHikeControl("resume")
         } else if (!mainViewModel.isPaused) {
             pauseHikingFromWatch()
         } else {
@@ -501,12 +505,12 @@ class ComposeMainActivity : ComponentActivity(), DataClient.OnDataChangedListene
     // 정지 = 일시정지 (세션 유지, 양쪽 동기화)
     private fun pauseHikingFromWatch() {
         applyPauseLocal()
-        putHikingStatus("paused")
+        notifyHikeControl("pause")
     }
 
     private fun resumeHikingFromWatch() {
         applyResumeLocal()
-        putHikingStatus("active")
+        notifyHikeControl("resume")
     }
 
     // 일시정지 로컬 적용(전송 중단). 서버 PUT은 호출측에서 결정
@@ -523,31 +527,26 @@ class ComposeMainActivity : ComponentActivity(), DataClient.OnDataChangedListene
 
     // 중단하기 = 완전 종료(기록 저장 status=completed). 양쪽 종료
     private fun abortHikingFromWatch() {
-        putHikingStatus("completed")
+        notifyHikeControl("abort")
         syncedHikingRecordId = null
         stopHikingFromWatch()
     }
 
-    // 산행 레코드 status를 백엔드에 PUT (active/paused/completed). recordId 없으면 무시
-    private fun putHikingStatus(status: String) {
-        val recordId = activeHikingRecordId ?: return
-        val baseUrl = BuildConfig.HEALTH_API_BASE_URL.trim().trimEnd('/')
-        if (baseUrl.isBlank()) return
-        val token = currentToken()
-        scope.launch(Dispatchers.IO) {
-            runCatching {
-                val connection = URL("$baseUrl/data/hiking_records/$recordId")
-                    .openConnection() as HttpURLConnection
-                connection.requestMethod = "PUT"
-                connection.connectTimeout = 5_000
-                connection.readTimeout = 5_000
-                connection.doOutput = true
-                connection.setRequestProperty("Content-Type", "application/json; charset=utf-8")
-                connection.setRequestProperty("Accept", "application/json")
-                if (token.isNotBlank()) connection.setRequestProperty("Authorization", "Bearer $token")
-                connection.outputStream.use { it.write("""{"status":"$status"}""".toByteArray(Charsets.UTF_8)) }
-                connection.responseCode
-                connection.disconnect()
+    // /hike/control: 워치가 시작한 산행 제어(pause/resume/abort/sos_cancel)를 모바일에 알린다.
+    // SOS 요청과 마찬가지로 유실되면 안 되므로 (휘발성 메시지가 아닌) DataItem으로 발행한다.
+    private fun notifyHikeControl(action: String) {
+        scope.launch {
+            try {
+                val payload = buildHikeControlPayload(
+                    action = action,
+                    id = java.util.UUID.randomUUID().toString(),
+                )
+                val req = payload.toPutDataMapRequest("/hike/control")
+                    .asPutDataRequest()
+                    .setUrgent()
+                Wearable.getDataClient(this@ComposeMainActivity).putDataItem(req).await()
+            } catch (e: Exception) {
+                e.printStackTrace()
             }
         }
     }
@@ -940,7 +939,7 @@ class ComposeMainActivity : ComponentActivity(), DataClient.OnDataChangedListene
 
         if (isMobileAnomalyAlert) {
             isMobileAnomalyAlert = false
-            putHikingStatus("active") // 모바일 중복 신고 방지
+            notifyHikeControl("sos_cancel") // 모바일 중복 신고 방지
         }
 
         // 즉시 "전송 중" 표시 (resetAnomaly 호출 안 함 → AlertScreen 유지)
@@ -993,8 +992,8 @@ class ComposeMainActivity : ComponentActivity(), DataClient.OnDataChangedListene
         anomalyCooldownUntilMs = System.currentTimeMillis() + ANOMALY_COOLDOWN_MS
         if (isMobileAnomalyAlert) {
             isMobileAnomalyAlert = false
-            // 모바일 폴러가 "active"를 감지 → dismissAnomaly() → 긴급신고 취소
-            putHikingStatus("active")
+            // 모바일이 sos_cancel을 수신 → dismissAnomaly() → 긴급신고 취소
+            notifyHikeControl("sos_cancel")
         }
     }
 
