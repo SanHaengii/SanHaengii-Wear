@@ -146,6 +146,26 @@ class ComposeMainActivity : ComponentActivity(), DataClient.OnDataChangedListene
         }
     }
 
+    // 디버그 진단용: 연결된 노드(폰) 수를 5초마다 갱신. 산행 활성 여부와 무관하게
+    // 앱이 떠 있는 동안 항상 동작해야 "페어링 안 됨"을 언제든 확인할 수 있다.
+    private val nodeCountPollRunnable = object : Runnable {
+        override fun run() {
+            pollConnectedNodeCount()
+            mainHandler.postDelayed(this, NODE_COUNT_POLL_INTERVAL_MS)
+        }
+    }
+
+    private fun pollConnectedNodeCount() {
+        scope.launch {
+            try {
+                val nodes = Wearable.getNodeClient(this@ComposeMainActivity).connectedNodes.await()
+                mainViewModel.updateConnectedNodeCount(nodes.size)
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+        }
+    }
+
     private val exerciseClient by lazy { HealthServices.getClient(this).exerciseClient }
     private val exerciseUpdateCallback = object : ExerciseUpdateCallback {
         override fun onExerciseUpdateReceived(update: ExerciseUpdate) {
@@ -201,7 +221,9 @@ class ComposeMainActivity : ComponentActivity(), DataClient.OnDataChangedListene
                             0 -> MainDashboard(
                                 bpm = mainViewModel.bpm,
                                 eta = mainViewModel.eta,
-                                distance = mainViewModel.distance
+                                distance = mainViewModel.distance,
+                                connectedNodeCount = mainViewModel.connectedNodeCount,
+                                lastReceivedAtMs = mainViewModel.lastReceivedAtMs,
                             )
                             1 -> SosScreen(
                                 isHikingActive = mainViewModel.isHikingActive,
@@ -224,6 +246,7 @@ class ComposeMainActivity : ComponentActivity(), DataClient.OnDataChangedListene
         }
 
         Wearable.getDataClient(this).addListener(this)
+        mainHandler.post(nodeCountPollRunnable)
 
         // 저장된 자격증명/생체값 복원. 자격증명·산행상태·이상징후는 이제 모두
         // /auth, /hike/state, /sos/ack Data Layer 이벤트로 폰이 직접 밀어준다 (onDataChanged 참고).
@@ -428,9 +451,18 @@ class ComposeMainActivity : ComponentActivity(), DataClient.OnDataChangedListene
             if (event.type != DataEvent.TYPE_CHANGED) return@forEach
             val map = DataMapItem.fromDataItem(event.dataItem).dataMap.toPlainMap()
             when (event.dataItem.uri.path) {
-                "/auth" -> applyAuthPayload(parseAuthPayload(map))
-                "/hike/state" -> applyHikeStatePayload(parseHikeStatePayload(map))
-                "/sos/ack" -> applySosAckPayload(parseSosAckPayload(map))
+                "/auth" -> {
+                    applyAuthPayload(parseAuthPayload(map))
+                    mainViewModel.markDataReceived()
+                }
+                "/hike/state" -> {
+                    applyHikeStatePayload(parseHikeStatePayload(map))
+                    mainViewModel.markDataReceived()
+                }
+                "/sos/ack" -> {
+                    applySosAckPayload(parseSosAckPayload(map))
+                    mainViewModel.markDataReceived()
+                }
             }
         }
     }
@@ -1136,6 +1168,7 @@ class ComposeMainActivity : ComponentActivity(), DataClient.OnDataChangedListene
         mainHandler.removeCallbacks(periodicHealthSendRunnable)
         mainHandler.removeCallbacks(fakeSpo2Runnable)
         mainHandler.removeCallbacks(anomalyCountdownRunnable)
+        mainHandler.removeCallbacks(nodeCountPollRunnable)
         exerciseClient.clearUpdateCallbackAsync(exerciseUpdateCallback)
         scope.cancel()
         super.onDestroy()
@@ -1151,6 +1184,7 @@ class ComposeMainActivity : ComponentActivity(), DataClient.OnDataChangedListene
         private const val PERMISSION_READ_OXYGEN_SATURATION =
             "android.permission.health.READ_OXYGEN_SATURATION"
         private const val HEALTH_SEND_INTERVAL_MS = 3_000L
+        private const val NODE_COUNT_POLL_INTERVAL_MS = 5_000L
         private const val PREFS_NAME = "sanhaengii_watch_prefs"
         private const val PREF_KEY_TOKEN = "health_api_token"
         private const val PREF_KEY_USER_ID = "health_api_user_id"

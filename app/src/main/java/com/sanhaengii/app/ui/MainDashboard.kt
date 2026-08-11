@@ -28,13 +28,20 @@ import androidx.wear.compose.material.Button
 import androidx.wear.compose.material.ButtonDefaults
 import androidx.wear.compose.material.Icon
 import androidx.wear.compose.material.Text
+import com.sanhaengii.app.BuildConfig
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 // 1. 메인 대시보드 화면 (ComposeMainActivity에서 직접 호출됨)
 @Composable
-fun MainDashboard(bpm: Int, eta: String, distance: String) {
+fun MainDashboard(
+    bpm: Int,
+    eta: String,
+    distance: String,
+    connectedNodeCount: Int = 0,
+    lastReceivedAtMs: Long? = null,
+) {
     // 심박수에 따른 하트 색상 변경 로직
     val heartColor = when {
         bpm >= 150 -> Color.Red
@@ -90,6 +97,31 @@ fun MainDashboard(bpm: Int, eta: String, distance: String) {
 
         Text(text = "⏰ 남은 시간: $etaDisplay", color = Color.LightGray, fontSize = 12.sp)
         Text(text = "🥾 잔여 거리: $distDisplay", color = Color.LightGray, fontSize = 12.sp)
+
+        // 디버그 진단: Data Layer 연결 노드 수 / 마지막 인바운드 수신 경과 시간.
+        // 패키지명·서명키 불일치 시 메시지가 조용히 유실되므로, "페어링 안 됨"과
+        // "페어링됐지만 응답 없음"을 구분하는 유일한 저비용 수단. 실서비스 화면을
+        // 침범하지 않도록 작은 글씨/무채색으로 표시하고 릴리스 빌드에서는 제외한다.
+        if (BuildConfig.DEBUG) {
+            // System.currentTimeMillis() 기반 경과초는 상태가 바뀌지 않으면 리컴포즈되지
+            // 않아 화면에 값이 멈춰 보인다("멈춘 3초 전"이 실제로는 몇 분 전일 수 있음).
+            // 1초마다 로컬 tick을 갱신해 항상 최신 경과 시간을 보여주고, 수신이 끊겼다는
+            // 사실을 (계속 커지는 숫자로) 정확히 드러낸다.
+            var nowMs by remember { mutableStateOf(System.currentTimeMillis()) }
+            LaunchedEffect(Unit) {
+                while (true) {
+                    delay(1_000L)
+                    nowMs = System.currentTimeMillis()
+                }
+            }
+            val agoSec = lastReceivedAtMs?.let { ((nowMs - it) / 1000L).coerceAtLeast(0L) }
+            Spacer(modifier = Modifier.height(6.dp))
+            Text(
+                text = "노드 ${connectedNodeCount}개 / 마지막 수신 ${agoSec?.let { "${it}초 전" } ?: "수신 없음"}",
+                color = Color.Gray,
+                fontSize = 9.sp,
+            )
+        }
     }
 }
 

@@ -25,6 +25,20 @@ class MainViewModel : ViewModel() {
     // 신고 전송 진행 상태 ("idle" / "sending" / "success" / "failed")
     var emergencySendState by mutableStateOf("idle")
 
+    // 디버그 진단용: Data Layer 연결 노드 수 / 마지막 인바운드 수신 시각
+    // (패키지명·서명키 불일치 시 메시지가 조용히 유실되므로, "페어링 안 됨"과
+    // "페어링됐지만 응답 없음"을 구분하는 유일한 저비용 수단)
+    var connectedNodeCount by mutableIntStateOf(0)
+    var lastReceivedAtMs by mutableStateOf<Long?>(null)
+
+    fun updateConnectedNodeCount(count: Int) {
+        connectedNodeCount = count
+    }
+
+    fun markDataReceived() {
+        lastReceivedAtMs = System.currentTimeMillis()
+    }
+
     fun resetSosReporting() {
         isSosReporting = false
     }
