@@ -17,9 +17,10 @@ data class SosAckPayload(val id: String, val state: String)
 // Every payload carries an "at" timestamp because the Data Layer silently drops
 // a putDataItem whose bytes are identical to the existing item.
 
-fun buildHealthLivePayload(hr: Int, spo2: Double, temp: Double, steps: Int): ByteArray {
+fun buildHealthLivePayload(hr: Int, spo2: Double?, temp: Double?, steps: Int): ByteArray {
     val at = System.currentTimeMillis()
-    return "$hr|$spo2|$temp|$steps|$at".toByteArray()
+    // 5필드 wire 형식은 유지하되 0.0을 미측정 sentinel로만 사용한다.
+    return "$hr|${spo2 ?: 0.0}|${temp ?: 0.0}|$steps|$at".toByteArray()
 }
 
 fun buildAnomalyPayload(type: String, message: String): Map<String, Any> = mapOf(
