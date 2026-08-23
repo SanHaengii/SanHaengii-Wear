@@ -20,15 +20,12 @@ val healthApiBaseUrl = localProperties.getProperty(
     "HEALTH_API_BASE_URL",
     "https://web-production-94f63.up.railway.app"
 )
-val healthApiToken = localProperties.getProperty("HEALTH_API_TOKEN", "")
-val healthApiUserId = localProperties.getProperty("HEALTH_API_USER_ID", "")
-// 로컬 Flask 서버 (에뮬레이터: 10.0.2.2, 실기기: 호스트 PC IP)
-val trailApiBaseUrl = localProperties.getProperty("TRAIL_API_BASE_URL", "http://10.0.2.2:5001")
 
 // 릴리스 서명 설정 (keystore.properties 에서 로드, 깃에 커밋 금지)
 val keystoreProperties = Properties()
 val keystorePropertiesFile = rootProject.file("keystore.properties")
 val hasReleaseSigning = keystorePropertiesFile.exists()
+val sharedDebugKeystoreFile = file(System.getProperty("user.home") + "/sanhaengii-shared-debug.keystore")
 if (hasReleaseSigning) {
     keystorePropertiesFile.inputStream().use { keystoreProperties.load(it) }
 }
@@ -45,9 +42,6 @@ android {
         versionName = "0.1.0"
 
         buildConfigField("String", "HEALTH_API_BASE_URL", healthApiBaseUrl.asBuildConfigString())
-        buildConfigField("String", "HEALTH_API_TOKEN", healthApiToken.asBuildConfigString())
-        buildConfigField("String", "HEALTH_API_USER_ID", healthApiUserId.asBuildConfigString())
-        buildConfigField("String", "TRAIL_API_BASE_URL", trailApiBaseUrl.asBuildConfigString())
     }
 
     signingConfigs {
@@ -60,11 +54,13 @@ android {
             }
         }
         // 모바일(Expo) 앱과 동일한 디버그 키를 사용 (Data Layer는 서명이 다르면 조용히 실패함)
-        create("sharedDebug") {
-            storeFile = file(System.getProperty("user.home") + "/sanhaengii-shared-debug.keystore")
-            storePassword = "android"
-            keyAlias = "androiddebugkey"
-            keyPassword = "android"
+        if (sharedDebugKeystoreFile.exists()) {
+            create("sharedDebug") {
+                storeFile = sharedDebugKeystoreFile
+                storePassword = "android"
+                keyAlias = "androiddebugkey"
+                keyPassword = "android"
+            }
         }
     }
 
@@ -80,7 +76,9 @@ android {
             )
         }
         getByName("debug") {
-            signingConfig = signingConfigs.getByName("sharedDebug")
+            if (sharedDebugKeystoreFile.exists()) {
+                signingConfig = signingConfigs.getByName("sharedDebug")
+            }
         }
     }
 
@@ -117,6 +115,7 @@ dependencies {
 
     // 기본 Compose
     implementation("androidx.activity:activity-compose:1.8.0")
+    implementation("androidx.core:core-ktx:1.13.1")
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.7.0")
     implementation("androidx.compose.ui:ui:1.6.1")
     implementation("androidx.compose.ui:ui-tooling-preview:1.6.1")

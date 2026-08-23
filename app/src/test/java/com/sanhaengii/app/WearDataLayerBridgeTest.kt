@@ -17,6 +17,13 @@ class WearDataLayerBridgeTest {
     }
 
     @Test
+    fun `미측정 SpO2와 체온은 가짜값 대신 wire sentinel로 직렬화된다`() {
+        val parts = String(buildHealthLivePayload(hr = 72, spo2 = null, temp = null, steps = 10)).split("|")
+        assertEquals("0.0", parts[1])
+        assertEquals("0.0", parts[2])
+    }
+
+    @Test
     fun `이상징후 payload는 type과 message와 타임스탬프를 포함한다`() {
         val map = buildAnomalyPayload("hr_high", "심박수 과부하 (170 bpm)")
         assertEquals("hr_high", map["type"])

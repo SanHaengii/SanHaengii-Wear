@@ -2,8 +2,11 @@ package com.sanhaengii.app.ui
 
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.CheckCircle
@@ -17,6 +20,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.PointerEventType
 import androidx.compose.ui.input.pointer.pointerInput
@@ -33,6 +37,16 @@ import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
+private val Background = Color(0xFF050806)
+private val Surface = Color(0xFF121713)
+private val SurfaceElevated = Color(0xFF1A211C)
+private val Outline = Color(0xFF2A332C)
+private val Primary = Color(0xFF5EEA8A)
+private val TextPrimary = Color(0xFFF4F7F4)
+private val TextSecondary = Color(0xFFA8B2AA)
+private val WarningColor = Color(0xFFFFC857)
+private val Danger = Color(0xFFFF5A61)
+
 // 1. 메인 대시보드 화면 (ComposeMainActivity에서 직접 호출됨)
 @Composable
 fun MainDashboard(
@@ -42,17 +56,18 @@ fun MainDashboard(
     connectedNodeCount: Int = 0,
     lastReceivedAtMs: Long? = null,
 ) {
-    // 심박수에 따른 하트 색상 변경 로직
+    val hasHeartRate = bpm > 0
     val heartColor = when {
-        bpm >= 150 -> Color.Red
-        bpm >= 125 -> Color.Yellow
-        else -> Color.Green
+        !hasHeartRate -> TextSecondary
+        bpm >= 150 || bpm < 40 -> Danger
+        bpm >= 125 -> WarningColor
+        else -> Primary
     }
 
     // 하트 깜빡임 애니메이션 (InfiniteTransition)
     val infiniteTransition = rememberInfiniteTransition(label = "heartBlink")
     val alpha by infiniteTransition.animateFloat(
-        initialValue = 0.5f,
+        initialValue = if (hasHeartRate) 0.65f else 1f,
         targetValue = 1.0f,
         animationSpec = infiniteRepeatable(
             animation = tween(1000, easing = LinearEasing),
@@ -61,42 +76,65 @@ fun MainDashboard(
         label = "heartAlpha"
     )
 
-    // 스마트워치의 둥근 화면에 맞춘 중앙 정렬 레이아웃
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .background(Color.Black), // 번인(Burn-in) 방지용 올블랙 배경
+            .background(Background)
+            .padding(horizontal = 18.dp, vertical = 14.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.Center
     ) {
-        // 하트 아이콘
-        Icon(
-            imageVector = Icons.Default.Favorite,
-            contentDescription = "Heart Rate",
-            tint = heartColor,
+        Row(
             modifier = Modifier
-                .size(40.dp)
-                .alpha(alpha)
-        )
-
-        Spacer(modifier = Modifier.height(4.dp))
-
-        // 현재 심박수 수치
-        Text(
-            text = "$bpm BPM",
-            color = Color.White,
-            fontSize = 28.sp,
-            fontWeight = FontWeight.Bold
-        )
-
-        Spacer(modifier = Modifier.height(12.dp))
-
-        // 산행 ETA 및 거리 정보
+                .clip(RoundedCornerShape(50))
+                .background(Surface)
+                .border(1.dp, Outline, RoundedCornerShape(50))
+                .padding(horizontal = 9.dp, vertical = 4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(5.dp),
+        ) {
+            Box(Modifier.size(6.dp).clip(CircleShape).background(if (hasHeartRate) Primary else TextSecondary))
+            Text(if (hasHeartRate) "실시간 건강 데이터" else "센서 연결 대기", color = TextSecondary, fontSize = 9.sp)
+        }
+        Spacer(modifier = Modifier.height(8.dp))
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Box(
+                modifier = Modifier.size(46.dp).clip(CircleShape).background(heartColor.copy(alpha = 0.14f)),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Favorite,
+                    contentDescription = "심박수",
+                    tint = heartColor,
+                    modifier = Modifier.size(25.dp).alpha(alpha),
+                )
+            }
+            Spacer(modifier = Modifier.width(10.dp))
+            Column {
+                Row(verticalAlignment = Alignment.Bottom) {
+                    Text(if (hasHeartRate) bpm.toString() else "--", color = TextPrimary, fontSize = 30.sp, fontWeight = FontWeight.Bold)
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text("BPM", color = TextSecondary, fontSize = 10.sp, modifier = Modifier.padding(bottom = 5.dp))
+                }
+                Text(
+                    when {
+                        !hasHeartRate -> "측정 대기"
+                        bpm >= 160 || bpm < 40 -> "위험 범위"
+                        bpm >= 125 -> "주의 범위"
+                        else -> "정상 범위"
+                    },
+                    color = heartColor,
+                    fontSize = 10.sp,
+                    fontWeight = FontWeight.SemiBold,
+                )
+            }
+        }
+        Spacer(modifier = Modifier.height(9.dp))
         val etaDisplay = if (eta == "-" || eta.isEmpty()) "-" else if (eta.contains("분")) eta else "${eta}분"
         val distDisplay = if (distance == "-" || distance.isEmpty()) "-" else if (distance.contains("km")) distance else "${distance}km"
-
-        Text(text = "⏰ 남은 시간: $etaDisplay", color = Color.LightGray, fontSize = 12.sp)
-        Text(text = "🥾 잔여 거리: $distDisplay", color = Color.LightGray, fontSize = 12.sp)
+        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(7.dp)) {
+            DashboardMetric("남은 시간", etaDisplay, Modifier.weight(1f))
+            DashboardMetric("잔여 거리", distDisplay, Modifier.weight(1f))
+        }
 
         // 디버그 진단: Data Layer 연결 노드 수 / 마지막 인바운드 수신 경과 시간.
         // 패키지명·서명키 불일치 시 메시지가 조용히 유실되므로, "페어링 안 됨"과
@@ -115,13 +153,29 @@ fun MainDashboard(
                 }
             }
             val agoSec = lastReceivedAtMs?.let { ((nowMs - it) / 1000L).coerceAtLeast(0L) }
-            Spacer(modifier = Modifier.height(6.dp))
+            Spacer(modifier = Modifier.height(4.dp))
             Text(
                 text = "노드 ${connectedNodeCount}개 / 마지막 수신 ${agoSec?.let { "${it}초 전" } ?: "수신 없음"}",
-                color = Color.Gray,
-                fontSize = 9.sp,
+                color = TextSecondary.copy(alpha = 0.65f),
+                fontSize = 8.sp,
             )
         }
+    }
+}
+
+@Composable
+private fun DashboardMetric(label: String, value: String, modifier: Modifier = Modifier) {
+    Column(
+        modifier = modifier
+            .clip(RoundedCornerShape(14.dp))
+            .background(Surface)
+            .border(1.dp, Outline, RoundedCornerShape(14.dp))
+            .padding(horizontal = 9.dp, vertical = 7.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        Text(label, color = TextSecondary, fontSize = 8.sp)
+        Spacer(modifier = Modifier.height(2.dp))
+        Text(value, color = TextPrimary, fontSize = 12.sp, fontWeight = FontWeight.Bold, maxLines = 1)
     }
 }
 
@@ -147,7 +201,7 @@ fun AlertScreen(
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .background(Color.Black)
+            .background(Background)
             .padding(horizontal = 12.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center
@@ -158,13 +212,13 @@ fun AlertScreen(
                 Icon(
                     imageVector = Icons.AutoMirrored.Filled.Send,
                     contentDescription = "Sending",
-                    tint = Color.Yellow.copy(alpha = sendingAlpha),
+                    tint = WarningColor.copy(alpha = sendingAlpha),
                     modifier = Modifier.size(36.dp)
                 )
                 Spacer(modifier = Modifier.height(8.dp))
                 Text(
                     text = "구조 신고\n전송 중…",
-                    color = Color.Yellow,
+                    color = WarningColor,
                     fontSize = 13.sp,
                     fontWeight = FontWeight.Bold,
                     textAlign = TextAlign.Center,
@@ -175,13 +229,13 @@ fun AlertScreen(
                 Icon(
                     imageVector = Icons.Default.CheckCircle,
                     contentDescription = "Success",
-                    tint = Color(0xFF4CAF50),
+                    tint = Primary,
                     modifier = Modifier.size(36.dp)
                 )
                 Spacer(modifier = Modifier.height(8.dp))
                 Text(
                     text = "✓ 신고 전송 완료",
-                    color = Color(0xFF4CAF50),
+                    color = Primary,
                     fontSize = 13.sp,
                     fontWeight = FontWeight.Bold,
                     textAlign = TextAlign.Center,
@@ -199,13 +253,13 @@ fun AlertScreen(
                 Icon(
                     imageVector = Icons.Default.ErrorOutline,
                     contentDescription = "Failed",
-                    tint = Color.Red,
+                    tint = Danger,
                     modifier = Modifier.size(36.dp)
                 )
                 Spacer(modifier = Modifier.height(8.dp))
                 Text(
                     text = "전송 실패",
-                    color = Color.Red,
+                    color = Danger,
                     fontSize = 13.sp,
                     fontWeight = FontWeight.Bold,
                     textAlign = TextAlign.Center,
@@ -213,7 +267,7 @@ fun AlertScreen(
                 Spacer(modifier = Modifier.height(4.dp))
                 Text(
                     text = "119에 직접 전화하세요",
-                    color = Color.Yellow,
+                    color = WarningColor,
                     fontSize = 11.sp,
                     fontWeight = FontWeight.Bold,
                     textAlign = TextAlign.Center,
@@ -222,7 +276,7 @@ fun AlertScreen(
                 if (onConfirm != null) {
                     Button(
                         onClick = onConfirm,
-                        colors = ButtonDefaults.buttonColors(backgroundColor = Color.Red),
+                        colors = ButtonDefaults.buttonColors(backgroundColor = Danger),
                         modifier = Modifier.fillMaxWidth(),
                     ) {
                         Text("재시도", color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold)
@@ -231,7 +285,7 @@ fun AlertScreen(
             }
             // ── 기본 이상징후 알림 (idle) ─────────────────────────
             else -> {
-                val tint = if (isWarning) Color.Red else Color.White
+                val tint = if (isWarning) Danger else TextPrimary
                 Icon(
                     imageVector = Icons.Default.Warning,
                     contentDescription = "Alert",
@@ -250,7 +304,7 @@ fun AlertScreen(
                     Spacer(modifier = Modifier.height(4.dp))
                     Text(
                         text = "${countdown}초 후 자동 신고",
-                        color = Color.Yellow,
+                        color = WarningColor,
                         fontSize = 11.sp,
                         fontWeight = FontWeight.Bold,
                     )
@@ -262,7 +316,7 @@ fun AlertScreen(
                         if (onConfirm != null) {
                             Button(
                                 onClick = onConfirm,
-                                colors = ButtonDefaults.buttonColors(backgroundColor = Color.Red),
+                                colors = ButtonDefaults.buttonColors(backgroundColor = Danger),
                                 modifier = Modifier.weight(1f),
                             ) {
                                 Text("신고", color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold)
@@ -271,7 +325,7 @@ fun AlertScreen(
                         if (onCancel != null) {
                             Button(
                                 onClick = onCancel,
-                                colors = ButtonDefaults.buttonColors(backgroundColor = Color.DarkGray),
+                                colors = ButtonDefaults.buttonColors(backgroundColor = SurfaceElevated),
                                 modifier = Modifier.weight(1f),
                             ) {
                                 Text(cancelLabel, color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold)
@@ -313,20 +367,20 @@ fun SosScreen(
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .background(Color.Black),
+                .background(Background),
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.Center
         ) {
             Icon(
                 imageVector = Icons.Default.Warning,
                 contentDescription = "Reporting",
-                tint = Color.Red,
+                tint = Danger,
                 modifier = Modifier.size(60.dp)
             )
             Spacer(modifier = Modifier.height(16.dp))
             Text(
                 text = "신고 접수중",
-                color = Color.Red,
+                color = Danger,
                 fontSize = 20.sp,
                 fontWeight = FontWeight.Bold
             )
@@ -335,7 +389,7 @@ fun SosScreen(
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .background(Color.Black)
+                .background(Background)
                 .padding(12.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.Center
@@ -353,7 +407,7 @@ fun SosScreen(
                     onClick = onAbort,
                     enabled = isHikingActive,
                     colors = ButtonDefaults.buttonColors(
-                        backgroundColor = Color.DarkGray
+                        backgroundColor = SurfaceElevated
                     ),
                     modifier = Modifier
                         .weight(1f)
@@ -382,7 +436,7 @@ fun SosScreen(
                 Button(
                     onClick = onHikingToggle,
                     colors = ButtonDefaults.buttonColors(
-                        backgroundColor = if (isRunning) Color.DarkGray else Color(0xFF2196F3)
+                        backgroundColor = if (isRunning) SurfaceElevated else Primary
                     ),
                     modifier = Modifier
                         .weight(1f)
@@ -448,8 +502,8 @@ fun SosScreen(
                 androidx.wear.compose.material.Card(
                     onClick = { /* pointerInput에서 처리함 */ },
                     backgroundPainter = androidx.wear.compose.material.CardDefaults.cardBackgroundPainter(
-                        startBackgroundColor = Color.Red,
-                        endBackgroundColor = Color.Red
+                        startBackgroundColor = Danger,
+                        endBackgroundColor = Danger
                     ),
                     modifier = Modifier.fillMaxSize(),
                     contentColor = Color.White

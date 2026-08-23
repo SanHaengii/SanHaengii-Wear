@@ -1,6 +1,5 @@
-## Copy this file to local.properties and fill in your real token if needed.
+## Copy this file to local.properties if you need to override the backend URL.
 ## Do not commit local.properties.
 
 HEALTH_API_BASE_URL=https://web-production-94f63.up.railway.app
-HEALTH_API_TOKEN=
-HEALTH_API_USER_ID=
+# JWT와 user_id는 모바일 /auth DataItem에서 받아 Android Keystore로 암호화 저장합니다.
